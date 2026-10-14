@@ -1,0 +1,11 @@
+@extends('layouts.app')
+@section('title','Cash & Bank Accounts') @section('page-title','Cash & Bank Accounts')
+@section('page-description','Balances posted journal lines se derive hote hain; yahan manual balance maintain nahi hota.')
+@section('page-actions') @can('financial_accounts.manage')<a class="btn btn-primary" href="{{ route('financial-accounts.create') }}">Add account</a>@endcan @endsection
+@section('content')
+<div class="card"><div class="card-body">
+<form class="row g-3 mb-4" method="GET"><div class="col-md-5"><input class="form-control" name="search" value="{{ request('search') }}" placeholder="Search account or bank"></div><div class="col-md-3"><select class="form-select" name="type"><option value="">All types</option><option value="cash" @selected(request('type')==='cash')>Cash</option><option value="bank" @selected(request('type')==='bank')>Bank</option></select></div><div class="col-md-2"><button class="btn btn-primary">Filter</button></div></form>
+<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Name</th><th>Type</th><th>Branch</th><th>GL Ledger</th><th>Bank / Number</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+@forelse($accounts as $item)<tr><td class="fw-semibold">{{ $item->name }}</td><td>{{ ucfirst($item->type) }}</td><td>{{ $item->branch->name }}</td><td>{{ $item->account->code }} — {{ $item->account->name }}</td><td>{{ $item->bank_name ?: '—' }}<br><small>{{ $item->maskedNumber() }}</small></td><td><span class="badge {{ $item->is_active?'text-bg-success':'text-bg-secondary' }}">{{ $item->is_active?'Active':'Inactive' }}</span></td><td>@can('financial_accounts.manage')<a class="btn btn-sm btn-outline-primary" href="{{ route('financial-accounts.edit',$item) }}">Edit</a><form class="d-inline" method="POST" action="{{ route('financial-accounts.toggle',$item) }}">@csrf<button class="btn btn-sm btn-outline-warning" data-confirm="Change account status?">Toggle</button></form>@endcan</td></tr>@empty<tr><td colspan="7" class="text-center py-5">No cash/bank accounts configured. Approved COA ledgers pehle required hain.</td></tr>@endforelse
+</tbody></table></div>{{ $accounts->links() }}</div></div>
+@endsection

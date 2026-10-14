@@ -1,0 +1,2 @@
+@extends('layouts.app') @section('title','Edit Fiscal Year') @section('eyebrow','Accounting Setup') @section('page-title','Edit Fiscal Year')
+@section('content')<form method="POST" action="{{ route('fiscal-years.update',$fiscalYear) }}" class="surface-card">@csrf @method('PUT')<div class="card-heading"><h2>{{ $fiscalYear->name }}</h2></div><div class="form-stack">@include('accounting-setup.fiscal-years._form')</div></form>@endsection

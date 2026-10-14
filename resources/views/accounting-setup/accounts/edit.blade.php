@@ -1,0 +1,2 @@
+@extends('layouts.app') @section('title','Edit Account') @section('eyebrow','Chart of Accounts') @section('page-title','Edit '.$account->code)
+@section('content')<form class="surface-card" method="POST" action="{{ route('accounts.update',$account) }}">@csrf @method('PUT')<div class="card-heading"><h2>{{ $account->name }}</h2></div><div class="form-stack">@include('accounting-setup.accounts._form')</div></form>@endsection

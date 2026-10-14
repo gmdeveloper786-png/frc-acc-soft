@@ -1,0 +1,11 @@
+@extends('layouts.app')
+@section('title','Opening Balance')
+@section('eyebrow',$openingBalance->fiscalYear->name)
+@section('page-title','Opening Balance')
+@section('page-description',$openingBalance->branch->name.' • '.$openingBalance->opening_date->format('d M Y'))
+@section('page-actions')<a class="btn btn-outline-primary" href="{{ route('opening-balances.index') }}">Back</a>@endsection
+@section('content')
+<section class="surface-card"><div class="card-heading"><h2>Balanced lines</h2><span class="status-badge neutral">{{ str($openingBalance->status)->headline() }}</span></div><div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Code</th><th>Account</th><th class="text-end">Debit</th><th class="text-end">Credit</th><th>Reference</th></tr></thead><tbody>@foreach($openingBalance->lines as $line)<tr><td><code>{{ $line->account->code }}</code></td><td>{{ $line->account->name }}</td><td class="text-end">{{ number_format((float)$line->debit,2) }}</td><td class="text-end">{{ number_format((float)$line->credit,2) }}</td><td>{{ $line->source_reference ?? '—' }}</td></tr>@endforeach</tbody><tfoot><tr><th colspan="2">Totals</th><th class="text-end">{{ number_format((float)$openingBalance->total_debit,2) }}</th><th class="text-end">{{ number_format((float)$openingBalance->total_credit,2) }}</th><th>Difference: {{ number_format((float)$openingBalance->difference,2) }}</th></tr></tfoot></table></div>
+<div class="d-flex gap-2">@can('opening_balances.approve')@if($openingBalance->status==='draft')<form method="POST" action="{{ route('opening-balances.approve',$openingBalance) }}">@csrf<button class="btn btn-primary">Approve Opening Balance</button></form>@endif @endcan @can('opening_balances.post')@if($openingBalance->status==='approved')<form method="POST" action="{{ route('opening-balances.post',$openingBalance) }}" onsubmit="return confirm('Post this opening balance to the General Ledger?')">@csrf<button class="btn btn-primary">Post through Journal Engine</button></form>@endif @endcan @if($openingBalance->journalEntry)<a class="btn btn-outline-primary" href="{{ route('journals.show',$openingBalance->journalEntry) }}">View Journal</a>@endif</div>
+</section>
+@endsection

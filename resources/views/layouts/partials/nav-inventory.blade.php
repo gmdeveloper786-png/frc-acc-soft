@@ -1,0 +1,14 @@
+{{-- Sidebar links for the inventory module. --}}
+@if(auth()->user()->canAny(['inventory.view', 'inventory_items.manage', 'inventory.receive', 'inventory.issue', 'inventory.return', 'inventory.adjust', 'inventory.transfer', 'inventory.approve_adjustment']))
+    <span class="sidebar-label">Inventory</span>
+    @can('inventory.view')<a href="{{ route('inventory.dashboard') }}" class="sidebar-link {{ request()->routeIs('inventory.dashboard') ? 'active' : '' }}"><span class="sidebar-icon">IN</span><span class="sidebar-text">Inventory Overview</span></a>@endcan
+    @can('inventory.view')<a href="{{ route('inventory.items.index') }}" class="sidebar-link {{ request()->routeIs('inventory.items.*','inventory.categories.*','inventory.locations.*') ? 'active' : '' }}"><span class="sidebar-icon">IT</span><span class="sidebar-text">Items</span></a>@endcan
+    @can('inventory.view')<a href="{{ route('inventory.balances.index') }}" class="sidebar-link {{ request()->routeIs('inventory.balances.*') ? 'active' : '' }}"><span class="sidebar-icon">SB</span><span class="sidebar-text">Stock Balances</span></a>@endcan
+    @can('inventory.receive')<a href="{{ route('inventory.receive.create') }}" class="sidebar-link {{ request()->routeIs('inventory.receive.*') ? 'active' : '' }}"><span class="sidebar-icon">RC</span><span class="sidebar-text">Receive Stock</span></a>@endcan
+    @can('inventory.issue')<a href="{{ route('inventory.issue.create') }}" class="sidebar-link {{ request()->routeIs('inventory.issue.*') ? 'active' : '' }}"><span class="sidebar-icon">IS</span><span class="sidebar-text">Issue Stock</span></a>@endcan
+    @can('inventory.return')<a href="{{ route('inventory.return.create') }}" class="sidebar-link {{ request()->routeIs('inventory.return.*') ? 'active' : '' }}"><span class="sidebar-icon">RT</span><span class="sidebar-text">Stock Returns</span></a>@endcan
+    @can('inventory.transfer')<a href="{{ route('inventory.transfer.create') }}" class="sidebar-link {{ request()->routeIs('inventory.transfer.*') ? 'active' : '' }}"><span class="sidebar-icon">TR</span><span class="sidebar-text">Branch Transfer</span></a>@endcan
+    @can('inventory.view')<a href="{{ route('inventory.adjustments.index') }}" class="sidebar-link {{ request()->routeIs('inventory.adjustments.*','inventory.adjust.*') ? 'active' : '' }}"><span class="sidebar-icon">AJ</span><span class="sidebar-text">Stock Adjustments</span></a>@endcan
+    @can('inventory.view')<a href="{{ route('inventory.movements.index') }}" class="sidebar-link {{ request()->routeIs('inventory.movements.*') ? 'active' : '' }}"><span class="sidebar-icon">MH</span><span class="sidebar-text">Movement History</span></a>@endcan
+    @can('inventory.view')<a href="{{ route('inventory.low-stock.index') }}" class="sidebar-link {{ request()->routeIs('inventory.low-stock.*') ? 'active' : '' }}"><span class="sidebar-icon">LS</span><span class="sidebar-text">Low Stock Alerts</span></a>@endcan
+@endif

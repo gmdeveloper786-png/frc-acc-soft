@@ -1,0 +1,128 @@
+<?php
+
+namespace App\Http\Controllers\Administration;
+
+use App\Http\Controllers\Controller;
+use App\Models\Permission;
+use App\Models\Role;
+use App\Services\ApprovalAuthorityService;
+use App\Services\AuditLogger;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\View\View;
+
+class RoleController extends Controller
+{
+    /**
+     * Display a listing of the resource.
+     */
+    public function index(): View
+    {
+        return view('administration.roles.index', ['roles' => Role::query()->withCount(['users', 'permissions'])->orderBy('name')->paginate(15)]);
+    }
+
+    /**
+     * Show the form for creating a new resource.
+     */
+    public function create(): View
+    {
+        return view('administration.roles.create', ['permissionGroups' => $this->permissionGroups()]);
+    }
+
+    /**
+     * Store a newly created resource in storage.
+     */
+    public function store(Request $request, AuditLogger $audit): RedirectResponse
+    {
+        $data = $this->validated($request);
+        $role = DB::transaction(function () use ($data, $audit): Role {
+            $role = Role::query()->create(['name' => $data['name'], 'guard_name' => 'web', 'max_branches' => $data['max_branches']]);
+            $role->syncPermissions($data['permissions']);
+            $audit->log('role.created', $role, ['permissions' => $data['permissions'], 'max_branches' => $data['max_branches']]);
+
+            return $role;
+        });
+
+        return redirect()->route('roles.show', $role)->with('status', 'Role created successfully.');
+    }
+
+    /**
+     * Display the specified resource.
+     */
+    public function show(Role $role): View
+    {
+        $role->load('permissions')->loadCount('users');
+
+        return view('administration.roles.show', compact('role'));
+    }
+
+    /**
+     * Show the form for editing the specified resource.
+     */
+    public function edit(Request $request, Role $role, ApprovalAuthorityService $authority): View
+    {
+        abort_if($role->is_protected, 403, 'Protected system roles cannot be edited.');
+        $this->guardAuthorityRole($request, $role, $authority);
+        $role->load('permissions');
+
+        return view('administration.roles.edit', ['role' => $role, 'permissionGroups' => $this->permissionGroups()]);
+    }
+
+    /**
+     * Update the specified resource in storage.
+     */
+    public function update(Request $request, Role $role, AuditLogger $audit, ApprovalAuthorityService $authority): RedirectResponse
+    {
+        abort_if($role->is_protected, 403, 'Protected system roles cannot be edited.');
+        $this->guardAuthorityRole($request, $role, $authority);
+        $data = $this->validated($request, $role);
+        DB::transaction(function () use ($role, $data, $audit): void {
+            $role->update(['name' => $data['name'], 'max_branches' => $data['max_branches']]);
+            $role->syncPermissions($data['permissions']);
+            $audit->log('role.permissions_updated', $role, ['permissions' => $data['permissions'], 'max_branches' => $data['max_branches']]);
+        });
+
+        return redirect()->route('roles.show', $role)->with('status', 'Role and permissions updated successfully.');
+    }
+
+    /**
+     * Remove the specified resource from storage.
+     */
+    public function destroy(string $id)
+    {
+        abort(405);
+    }
+
+    /** A role that carries Director authority may only be changed by a Director. */
+    private function guardAuthorityRole(Request $request, Role $role, ApprovalAuthorityService $authority): void
+    {
+        abort_if($role->approval_authority !== null && ! $authority->mayManageDirectorRole($request->user()), 403, 'A role that carries Director approval authority can only be changed by a Director.');
+    }
+
+    private function validated(Request $request, ?Role $role = null): array
+    {
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255', Rule::unique('roles', 'name')->ignore($role)],
+            'max_branches' => ['nullable', 'integer', 'min:1', 'max:1000'],
+            'permissions' => ['array'], 'permissions.*' => ['string', Rule::exists('permissions', 'name')],
+        ]);
+
+        // An omitted optional field keeps the role's current value. The form marks
+        // its permission list as submitted so that clearing every box is honoured.
+        if (! array_key_exists('max_branches', $data)) {
+            $data['max_branches'] = $role?->max_branches;
+        }
+        if (! array_key_exists('permissions', $data)) {
+            $data['permissions'] = $role && ! $request->boolean('permissions_submitted') ? $role->permissions()->pluck('name')->all() : [];
+        }
+
+        return $data;
+    }
+
+    private function permissionGroups(): array
+    {
+        return Permission::query()->orderBy('group_name')->orderBy('name')->get()->groupBy('group_name')->all();
+    }
+}

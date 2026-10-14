@@ -1,3 +1,57 @@
+# FRC Accounting Software Project Instructions
+
+## Milestone 2 access conventions
+
+- Authorization is database-driven through `spatie/laravel-permission`; protected routes are default-deny.
+- Never authorize by numeric role ID or scatter role-name checks. System role names belong in `App\Enums\SystemRole`.
+- `is_administrator` is a bootstrap marker only. The RBAC seeder reconciles it to the protected Administrator role; it is not a global Gate bypass.
+- Branch-owned records must use `App\Services\BranchAccess` or equivalent server-side policy/scoping logic. A UI selector is not authorization.
+- FRC owns branch and service masters. Accounting mirrors are read-only and synchronize by external IDs.
+- Sensitive access, settings and sync changes use `AuditLogger`; never audit passwords, tokens, secrets or APP_KEY values.
+
+## Project boundary
+
+- This Laravel 13 project is the only active development target for accounting work.
+- `../frc-software-vs` is the existing Laravel 10 FRC Management Software and is read-only unless the user approves a precisely described change.
+- Never share databases or directly write to the Laravel 10 database. Integration uses authenticated, environment-configured HTTP APIs.
+- Never expose credentials, access tokens, private client data, `APP_KEY`, or passwords in source, views, logs, tests, or documentation.
+
+## Approved domain rules
+
+- The product serves one organisation, Faizan Rehabilitation Centre, across multiple branches. School Readiness is an FRC service, not a separate company, school entity, or department.
+- Financial years run from 1 January through 31 December. The initial opening date is 1 January 2026.
+- Posted journals must balance; posted history is corrected by reversal/corrective entries and is never silently edited or deleted.
+- Closed periods reject unauthorized posting. Money must use fixed-precision decimal storage and calculations, never floating point.
+- Business values that can change belong in database settings or centralized configuration. Do not scatter role-name checks or business thresholds through controllers, Blade, or JavaScript.
+- Do not fabricate accounting balances or automatically post FRC operational payments before mapping and idempotency rules exist.
+
+## Development and verification
+
+- Follow Laravel 13 conventions, typed PHP, Form Requests, named routes, policies/permissions, CSRF protection, and backend authorization.
+- Preserve uncommitted work and inspect sibling files before edits.
+- Public registration is disabled. Authentication must reject inactive users and rate-limit login attempts.
+- Use `Http::fake()` for integration client tests. Tokens remain server-side and must not appear in exceptions or UI.
+- Never run `migrate:fresh`, `db:wipe`, destructive resets, or uncontrolled financial seeders.
+- Before handoff run Pint, the relevant Pest tests, `php artisan route:list`, and `npm run build`.
+
+## Token efficiency rules
+
+- Work only on the requested task.
+- Inspect only relevant files and dependencies.
+- Do not scan the entire workspace repeatedly.
+- Read existing project documentation instead of requesting repeated requirements.
+- Preserve completed functionality.
+- Avoid unnecessary refactoring.
+- Do not rewrite unrelated files.
+- Run focused tests during implementation.
+- Run full regression tests at milestone completion.
+- Keep final reports under 400 words.
+- Summarize modified files and test results.
+- Avoid repeating lengthy explanations.
+- Ask questions only for genuinely blocking decisions.
+- Do not sacrifice security or correctness to save tokens.
+- Never modify the Laravel 10 project without approval.
+
 <laravel-boost-guidelines>
 === foundation rules ===
 
@@ -97,6 +151,16 @@ This project has domain-specific skills available in `**/skills/**`. You MUST ac
 
 - Laravel can be deployed using [Laravel Cloud](https://cloud.laravel.com/), which is the fastest way to deploy and scale production Laravel applications.
 - Activate the `deploying-to-cloud` skill whenever deploying to Laravel Cloud, configuring Cloud environments or resources, using the Cloud CLI, or troubleshooting Cloud deployments.
+
+=== tests rules ===
+
+# Test Enforcement
+
+- Add or update tests for behavior and logic changes when a test provides meaningful regression coverage.
+- Pure copy, styling, and layout-only changes do not require new or updated tests.
+- When test coverage applies, run the affected tests and ensure they pass.
+- Test the changed behavior and its important failure modes, but do not add tests beyond them.
+- Read the `testing-best-practices` skill before writing tests.
 
 === laravel/core rules ===
 
