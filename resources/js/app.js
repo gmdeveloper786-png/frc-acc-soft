@@ -112,6 +112,15 @@ document.querySelectorAll('[data-submit-once]').forEach((form) => {
         if (! form.checkValidity()) return;
         const submitter = event.submitter;
         if (submitter) {
+            // A disabled button is not sent, so carry its name/value (e.g. action=exclude) in a hidden field.
+            if (submitter.name && ! form.querySelector(`input[type=hidden][data-submitter="${submitter.name}"]`)) {
+                const carrier = document.createElement('input');
+                carrier.type = 'hidden';
+                carrier.name = submitter.name;
+                carrier.value = submitter.value;
+                carrier.dataset.submitter = submitter.name;
+                form.append(carrier);
+            }
             submitter.disabled = true;
             submitter.textContent = 'Processing...';
         }

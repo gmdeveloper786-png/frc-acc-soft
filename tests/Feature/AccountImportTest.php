@@ -184,3 +184,42 @@ test('review screen filters rows records decisions and exports the approval summ
     $this->actingAs($viewer)->post(route('account-imports.decide', $import), ['rows' => [$row->id], 'decision' => 'excluded'])->assertForbidden();
     $this->actingAs($viewer)->get(route('account-imports.export', $import))->assertForbidden();
 });
+
+test('heading 215 stays importable for its non inter-unit ledgers while 21501 is proposed for exclusion', function () {
+    $import = app(AccountImportService::class)->preview(clientCoaUpload(), $this->admin);
+    $rows = $import->rows()->get()->keyBy('code');
+
+    expect($rows['215']->proposed_decision)->toBe('include')
+        ->and($rows['215']->requires_manual_review)->toBeTrue()
+        ->and($rows['215']->proposed_reason)->toContain('21502')->toContain('21503')
+        ->and($rows['21501']->proposed_decision)->toBe('exclude')
+        ->and($rows['11602']->proposed_decision)->toBe('exclude')
+        ->and($rows['21502']->proposed_decision)->toBe('include')
+        ->and($rows['21503']->proposed_decision)->toBe('include')
+        ->and($import->summary['manual_review_flagged'])->toBe(11)
+        ->and($import->rows()->where('review_status', '!=', 'pending')->count())->toBe(0)
+        ->and(Account::query()->count())->toBe(0);
+});
+
+test('heading 215 cannot be skipped or excluded while its approved ledgers depend on it', function () {
+    $service = app(AccountImportService::class);
+    $import = $service->preview(clientCoaUpload(), $this->admin);
+    $id = fn (string $code): int => $import->rows()->where('code', $code)->value('id');
+
+    expect(fn () => $service->decide($import, [$id('2'), $id('21'), $id('21502')], 'approved', 'Accountant approved the grant ledger', $this->admin))
+        ->toThrow(ValidationException::class, 'Approve required parent 215');
+
+    $service->decide($import, [$id('2'), $id('21'), $id('215'), $id('21502'), $id('21503')], 'approved', 'Accountant approved grant and other payables under the existing heading', $this->admin);
+    $service->decide($import, [$id('21501')], 'excluded', 'Inter-unit ledger; FRC is one organisation', $this->admin);
+
+    expect(fn () => $service->decide($import->fresh(), [$id('215')], 'excluded', 'Trying to drop the heading', $this->admin))
+        ->toThrow(ValidationException::class, 'Approved child accounts still depend on a selected parent');
+
+    expect($service->confirm($import->fresh(), [], $this->admin))->toBe(5);
+    $accounts = Account::query()->pluck('name', 'code');
+    expect(Account::query()->orderBy('code')->pluck('code')->all())->toBe(['2', '21', '215', '21502', '21503'])
+        ->and($accounts['215'])->toBe('Inter-Unit & Other')
+        ->and($accounts['21502'])->toBe('Deferred Grant Income')
+        ->and(Account::query()->where('code', '21502')->first()->parent->code)->toBe('215')
+        ->and(Account::query()->where('code', '21501')->exists())->toBeFalse();
+});

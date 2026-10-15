@@ -86,7 +86,7 @@ class BudgetService
             ]);
             $this->syncLines($budget, $computed['lines']);
             $this->record($budget, 'updated', $from, $actor, "Total changed from {$previousTotal} to {$budget->total_amount}.");
-            $this->audit->log('budgets.updated', $budget, [...$this->auditContext($budget), 'previous_total' => $previousTotal]);
+            $this->audit->log('budgets.updated', $budget, [...$this->auditContext($budget), 'previous_total' => $previousTotal], $actor);
 
             return $budget->load('lines');
         });
@@ -201,7 +201,7 @@ class BudgetService
     {
         return $budget->status === BudgetStatus::Submitted
             && $actor->is_active && $actor->can('budgets.approve')
-            && ! in_array($actor->id, [$budget->created_by, $budget->submitted_by], true)
+            && ! in_array($actor->id, [$budget->created_by, $budget->submitted_by, ...$this->editors($budget)], true)
             && $this->branchAccess->canAccess($actor, $budget->branch);
     }
 
@@ -391,6 +391,15 @@ class BudgetService
         if (in_array($actor->id, [$budget->created_by, $budget->submitted_by], true)) {
             throw ValidationException::withMessages(['approval' => 'The user who created or submitted a budget cannot approve or reject it.']);
         }
+        if (in_array($actor->id, $this->editors($budget), true)) {
+            throw ValidationException::withMessages(['approval' => 'You edited this budget, so another user must approve it.']);
+        }
+    }
+
+    /** @return list<int> Users who changed the budget lines while it was a draft. */
+    private function editors(Budget $budget): array
+    {
+        return $this->audit->actorIds($budget, ['budgets.updated']);
     }
 
     /** The header total must still equal the stored lines and every line must still be budgetable. */

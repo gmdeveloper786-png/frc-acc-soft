@@ -35,6 +35,7 @@ class OperationalTransactionService
         private AccountMappingService $mappings,
         private ApprovalAuthorityService $authority,
         private SplitPaymentDetector $splits,
+        private ManualJournalGuard $guard,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -340,9 +341,13 @@ class OperationalTransactionService
                 throw ValidationException::withMessages(['financial_account_id' => "A {$expected} account is required."]);
             }
         }
+        $controlled = array_map('intval', $this->guard->controlledAccountIds());
         foreach (['contra_account_id', 'payable_account_id'] as $field) {
             if (filled($data[$field] ?? null) && ! Account::query()->whereKey($data[$field])->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->exists()) {
                 throw ValidationException::withMessages([$field => 'Only an active postable ledger account may be selected.']);
+            }
+            if (filled($data[$field] ?? null) && in_array((int) $data[$field], $controlled, true)) {
+                throw ValidationException::withMessages([$field => 'A cash, bank or petty cash ledger cannot be the other side of this transaction. Record cash-bank transfers as a CV (contra) journal, which needs maker-checker approval.']);
             }
         }
         if (filled($data['payable_account_id'] ?? null) && ! Account::query()->whereKey($data['payable_account_id'])->where('account_type', 'liability')->where('normal_balance', 'credit')->exists()) {

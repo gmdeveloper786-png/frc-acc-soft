@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\User;
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Support\Facades\Hash;
@@ -23,7 +24,8 @@ test('an active user can reset their password', function () {
         return true;
     });
 
-    expect(Hash::check('NewValidPassword123!', $user->fresh()->password))->toBeTrue();
+    expect(Hash::check('NewValidPassword123!', $user->fresh()->password))->toBeTrue()
+        ->and(AuditLog::query()->where('event', 'auth.password_reset')->where('auditable_id', $user->id)->exists())->toBeTrue();
 });
 
 test('inactive users are not sent password reset links', function () {

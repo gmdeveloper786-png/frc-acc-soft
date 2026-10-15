@@ -36,6 +36,12 @@ $enrollments = [
     ['id' => 503, 'branch_id' => 990002, 'service_id' => 990101, 'status' => 'completed', 'payment_status' => 'partial_paid', 'final_total' => '6000.00', 'discount_amount' => '0.00', 'paid_amount' => '4000.00', 'remaining_amount' => '2000.00', 'approved_at' => '2026-10-01T08:00:00+05:00', 'created_at' => $stamp(3), 'updated_at' => $stamp(3), 'deleted_at' => null],
     ['id' => 504, 'branch_id' => 990002, 'service_id' => 990102, 'status' => 'cancelled', 'payment_status' => 'partial_paid', 'final_total' => '3000.00', 'discount_amount' => '0.00', 'paid_amount' => '500.00', 'remaining_amount' => '2500.00', 'approved_at' => null, 'created_at' => $stamp(4), 'updated_at' => $stamp(4), 'deleted_at' => null],
 ];
+// Optional later source changes, switched on by the release UAT through storage/uat/fake-frc-extra.json:
+// a new enrollment and payment of the unmapped Quran Teaching service, and a refund of an earlier payment.
+$extra = json_decode((string) @file_get_contents(__DIR__.'/../../storage/uat/fake-frc-extra.json'), true) ?: [];
+if (! empty($extra['quran'])) {
+    $enrollments[] = ['id' => 505, 'branch_id' => 990001, 'service_id' => 990103, 'status' => 'active', 'payment_status' => 'partial_paid', 'final_total' => '2000.00', 'discount_amount' => '0.00', 'paid_amount' => '700.00', 'remaining_amount' => '1300.00', 'approved_at' => '2026-10-11T08:00:00+05:00', 'created_at' => $stamp(30), 'updated_at' => $stamp(30), 'deleted_at' => null];
+}
 $enrollmentRef = fn (int $id): array => (function () use ($id, $enrollments): array {
     foreach ($enrollments as $row) {
         if ($row['id'] === $id) {
@@ -62,6 +68,16 @@ $payments = [
     $payment(9009, null, 501, '1000.00', 'cash', 'rejected', '2026-10-08', 18),
     $payment(9010, 'UAT-000008', 504, '500.00', 'cash', 'paid', '2026-10-10', 19),
 ];
+if (! empty($extra['quran'])) {
+    $payments[] = $payment(9011, 'UAT-000009', 505, '700.00', 'cash', 'paid', '2026-10-11', 31);
+}
+foreach ($payments as &$row) {
+    if (isset($extra['refund']) && $row['id'] === (int) $extra['refund']) {
+        $row['status'] = 'refunded';
+        $row['updated_at'] = $stamp(32);
+    }
+}
+unset($row);
 
 /** Cursor pagination over (updated_at, id), per the proposed contract. */
 $page = function (array $rows): array {

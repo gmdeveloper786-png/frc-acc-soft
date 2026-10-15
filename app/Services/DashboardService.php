@@ -28,6 +28,7 @@ use App\Models\PurchaseBill;
 use App\Models\PurchaseOrder;
 use App\Models\User;
 use App\Services\Budgets\BudgetReportService;
+use App\Services\Reports\Statements\LedgerActivityReader;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Database\Query\Builder;
@@ -153,6 +154,7 @@ class DashboardService
             ->whereIn('accounts.account_type', [AccountType::Income->value, AccountType::Expense->value])
             ->whereDate('journal_entries.transaction_date', '>=', $year->start_date->toDateString())
             ->whereDate('journal_entries.transaction_date', '<=', $year->end_date->toDateString())
+            ->tap(fn (Builder $query) => LedgerActivityReader::withoutYearEndClosing($query))
             ->groupBy('accounts.account_type')
             ->selectRaw('accounts.account_type as account_type, SUM(journal_lines.debit) as debit, SUM(journal_lines.credit) as credit, COUNT(*) as line_count')
             ->get()->keyBy('account_type');

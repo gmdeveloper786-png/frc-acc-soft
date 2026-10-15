@@ -96,6 +96,14 @@ class JournalController extends Controller
         return back()->with('status', 'Journal returned for correction.');
     }
 
+    public function destroy(Request $request, JournalEntry $journal, JournalWorkflowService $workflow): RedirectResponse
+    {
+        $validated = $request->validate(['reason' => ['required', 'string', 'min:5', 'max:2000']]);
+        $workflow->discard($journal, $request->user(), $validated['reason']);
+
+        return redirect()->route('journals.index')->with('status', 'Draft journal discarded.');
+    }
+
     public function post(Request $request, JournalEntry $journal, JournalPostingService $posting): RedirectResponse
     {
         $posting->post($journal, $request->user());

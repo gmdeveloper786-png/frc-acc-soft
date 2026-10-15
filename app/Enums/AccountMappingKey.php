@@ -17,6 +17,7 @@ enum AccountMappingKey: string
     case PettyCash = 'petty_cash';
     case SalaryExpense = 'salary_expense';
     case SalaryPayable = 'salary_payable';
+    case AccumulatedSurplus = 'accumulated_surplus';
 
     public function label(): string
     {
@@ -29,6 +30,7 @@ enum AccountMappingKey: string
             self::PettyCash => 'Petty Cash',
             self::SalaryExpense => 'Salary Expense',
             self::SalaryPayable => 'Salary Payable',
+            self::AccumulatedSurplus => 'Accumulated Surplus (year-end closing)',
         };
     }
 
@@ -43,6 +45,7 @@ enum AccountMappingKey: string
             self::PettyCash => 'Optional petty cash control ledger.',
             self::SalaryExpense => 'Expense ledger debited when an approved payroll run is accrued. Required before payroll posting.',
             self::SalaryPayable => 'Liability ledger credited with net salaries and cleared by salary payments. Required before payroll posting.',
+            self::AccumulatedSurplus => 'Fund/equity ledger that receives each branch\'s net surplus (credit) or deficit (debit) for the year when the year-end closing entry is posted. Required before year-end closing.',
         };
     }
 
@@ -53,6 +56,7 @@ enum AccountMappingKey: string
             self::AccountsPayable, self::PurchaseBillControl, self::SalaryPayable => AccountType::Liability,
             self::FeeIncomeGeneral => AccountType::Income,
             self::DefaultExpense, self::SalaryExpense => AccountType::Expense,
+            self::AccumulatedSurplus => AccountType::Equity,
         };
     }
 

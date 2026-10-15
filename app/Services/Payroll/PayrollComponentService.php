@@ -9,6 +9,7 @@ use App\Models\Account;
 use App\Models\PayrollComponent;
 use App\Models\User;
 use App\Services\AuditLogger;
+use App\Services\ManualJournalGuard;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -19,7 +20,7 @@ use Illuminate\Validation\ValidationException;
  */
 class PayrollComponentService
 {
-    public function __construct(private AuditLogger $audit) {}
+    public function __construct(private AuditLogger $audit, private ManualJournalGuard $guard) {}
 
     /** @param array<string, mixed> $data */
     public function create(array $data, User $actor): PayrollComponent
@@ -57,14 +58,15 @@ class PayrollComponentService
     /**
      * Ledgers a component of this type may point to: an expense ledger for an
      * earning; a liability or asset ledger (tax payable, staff advances) for a
-     * deduction.
+     * deduction. Cash, bank and petty cash ledgers are never eligible: payroll
+     * posting would otherwise move money out of them with no payment workflow.
      *
      * @return Collection<int, Account>
      */
     public function eligibleAccounts(PayrollComponentType $type): Collection
     {
         return Account::query()->where('level', AccountLevel::Ledger->value)->where('is_postable', true)->where('is_active', true)
-            ->whereIn('account_type', $this->accountTypes($type))->orderBy('code')->get();
+            ->whereIn('account_type', $this->accountTypes($type))->whereNotIn('id', $this->guard->controlledAccountIds())->orderBy('code')->get();
     }
 
     /**
@@ -78,6 +80,9 @@ class PayrollComponentService
             throw ValidationException::withMessages(['account_id' => $type === PayrollComponentType::Earning
                 ? 'An earning may only override Salary Expense with an active, postable expense ledger.'
                 : 'A deduction needs an active, postable liability or asset ledger.']);
+        }
+        if ($accountId !== null && in_array($accountId, array_map('intval', $this->guard->controlledAccountIds()), true)) {
+            throw ValidationException::withMessages(['account_id' => 'A payroll component cannot use a cash, bank or petty cash ledger. Salary payments go through the payroll payment workflow.']);
         }
 
         return ['name' => trim((string) $data['name']), 'account_id' => $accountId, 'is_active' => (bool) ($data['is_active'] ?? false), 'sort_order' => (int) ($data['sort_order'] ?? 0)];

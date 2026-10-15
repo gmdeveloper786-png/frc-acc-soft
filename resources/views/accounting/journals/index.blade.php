@@ -2,7 +2,7 @@
 @section('title','Journal Entries')
 @section('page-title','Journal Entries')
 @section('page-description','Draft, approve, post and reverse auditable double-entry journals.')
-@section('page-actions')@can('journals.create')<a class="btn btn-primary" href="{{ route('journals.create') }}">New Journal</a>@endcan@endsection
+@section('page-actions')@can('journals.create')<a class="btn btn-primary" href="{{ route('journals.create') }}">New Journal</a>@endcan @endsection
 @section('content')
 <div class="surface-card">
     <form class="filter-bar" method="GET"><input class="form-control" name="search" value="{{ request('search') }}" placeholder="Voucher, reference or narration"><select class="form-select" name="status"><option value="">All statuses</option>@foreach(\App\Enums\JournalStatus::cases() as $status)<option value="{{ $status->value }}" @selected(request('status')===$status->value)>{{ str($status->value)->headline() }}</option>@endforeach</select><button class="btn btn-primary">Filter</button></form>

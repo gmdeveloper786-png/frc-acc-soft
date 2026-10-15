@@ -30,6 +30,7 @@ use App\Services\AuditLogger;
 use App\Services\BranchAccess;
 use App\Services\JournalPostingService;
 use App\Services\JournalReversalService;
+use App\Services\ManualJournalGuard;
 use App\Services\OperationalTransactionService;
 use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
@@ -58,6 +59,7 @@ class PayrollRunService
         private JournalPostingService $posting,
         private JournalReversalService $reversal,
         private OperationalTransactionService $transactions,
+        private ManualJournalGuard $guard,
     ) {}
 
     /** Whether the Director-controlled payroll calculation policy has been approved. */
@@ -125,7 +127,7 @@ class PayrollRunService
             $line = $run->lines()->whereKey($line->id)->firstOrFail();
             $this->writeItems($line, $amounts);
             $this->refreshTotals($run);
-            $this->audit->log('payroll.line_updated', $run, ['payroll_run_line_id' => $line->id, 'employee_id' => $line->employee_id]);
+            $this->audit->log('payroll.line_updated', $run, ['payroll_run_line_id' => $line->id, 'employee_id' => $line->employee_id], $actor);
 
             return $line->refresh();
         });
@@ -148,7 +150,7 @@ class PayrollRunService
             $line = $run->lines()->create(['employee_id' => $employee->id]);
             $this->writeItems($line, $employee->salaryItems->mapWithKeys(fn ($item): array => [$item->payroll_component_id => $item->amount])->all());
             $this->refreshTotals($run);
-            $this->audit->log('payroll.line_added', $run, ['payroll_run_line_id' => $line->id, 'employee_id' => $employee->id]);
+            $this->audit->log('payroll.line_added', $run, ['payroll_run_line_id' => $line->id, 'employee_id' => $employee->id], $actor);
 
             return $line->refresh();
         });
@@ -166,7 +168,7 @@ class PayrollRunService
             $line->items()->get()->each->delete();
             $line->delete();
             $this->refreshTotals($run);
-            $this->audit->log('payroll.line_removed', $run, ['employee_id' => $employeeId]);
+            $this->audit->log('payroll.line_removed', $run, ['employee_id' => $employeeId], $actor);
         });
     }
 
@@ -608,6 +610,7 @@ class PayrollRunService
         $salaryExpense = $this->mappings->resolve(AccountMappingKey::SalaryExpense);
         $salaryPayable = $this->mappings->resolve(AccountMappingKey::SalaryPayable);
         $zero = BigDecimal::zero()->toScale(4);
+        $controlled = array_map('intval', $this->guard->controlledAccountIds());
 
         /** @var array<int, array{component: PayrollComponent, total: BigDecimal}> $byComponent */
         $byComponent = [];
@@ -637,6 +640,9 @@ class PayrollRunService
             }
             if (! $this->isPostableLedger($component->account)) {
                 throw ValidationException::withMessages(['mapping' => "Configuration error: deduction component {$component->name} has no active, postable ledger. Set its account under Payroll Components before posting."]);
+            }
+            if (in_array((int) $component->account->id, $controlled, true)) {
+                throw ValidationException::withMessages(['mapping' => "Configuration error: deduction component {$component->name} points to a cash, bank or petty cash ledger. Salary payments go through the payroll payment workflow; change its account under Payroll Components before posting."]);
             }
             $credits[] = ['account_id' => $component->account->id, 'description' => $component->name.' withheld', 'debit' => '0.0000', 'credit' => AccountingDecimal::string($total)];
         }
@@ -714,14 +720,26 @@ class PayrollRunService
     private function assertNotMaker(PayrollRun $run, User $actor): void
     {
         if (in_array($actor->id, $this->makers($run), true)) {
-            throw ValidationException::withMessages(['approval' => 'The user who created, validated or submitted a payroll run cannot approve or reject it.']);
+            throw ValidationException::withMessages(['approval' => in_array($actor->id, $this->editors($run), true)
+                ? 'You edited this payroll run, so another user must approve it.'
+                : 'The user who created, validated or submitted a payroll run cannot approve or reject it.']);
         }
     }
 
-    /** @return list<int> */
+    /**
+     * Creator, validator, submitter and every user who changed a line.
+     *
+     * @return list<int>
+     */
     private function makers(PayrollRun $run): array
     {
-        return array_values(array_filter([$run->created_by, $run->validated_by, $run->submitted_by]));
+        return array_values(array_unique(array_map('intval', array_filter([$run->created_by, $run->validated_by, $run->submitted_by, ...$this->editors($run)]))));
+    }
+
+    /** @return list<int> Users who added, changed or removed a line of the run. */
+    private function editors(PayrollRun $run): array
+    {
+        return $this->audit->actorIds($run, ['payroll.line_updated', 'payroll.line_added', 'payroll.line_removed']);
     }
 
     /**

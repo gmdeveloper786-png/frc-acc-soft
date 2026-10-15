@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\User;
 use Illuminate\Support\Facades\Hash;
 
@@ -19,6 +20,10 @@ test('active users can view and update their profile', function () {
 
     expect($user->fresh()->name)->toBe('Accounting Administrator')
         ->and($user->fresh()->email)->toBe('accounts@example.test');
+
+    $audit = AuditLog::query()->where('event', 'profile.updated')->sole();
+    expect($audit->actor_id)->toBe($user->id)
+        ->and($audit->properties['fields'])->toContain('name')->toContain('email');
 });
 
 test('active users can change their password', function () {
@@ -32,4 +37,8 @@ test('active users can change their password', function () {
 
     expect(Hash::check('NewValidPassword123!', $user->fresh()->password))->toBeTrue()
         ->and($user->fresh()->password_changed_at)->not->toBeNull();
+
+    $audit = AuditLog::query()->where('event', 'profile.password_changed')->sole();
+    expect($audit->actor_id)->toBe($user->id)
+        ->and(json_encode($audit->properties))->not->toContain('NewValidPassword123!');
 });

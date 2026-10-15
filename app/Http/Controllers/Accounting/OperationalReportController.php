@@ -30,14 +30,21 @@ class OperationalReportController extends Controller
         abort_unless(in_array($kind, ['cash', 'bank'], true) && $request->user()->can($kind.'_books.view'), 403);
         $financialAccounts = $this->financialAccounts($request, $access, $kind);
         $lines = $this->bookLines($request, $access, $financialAccounts)->orderBy('id')->paginate(50)->withQueryString();
+        $accountNames = $this->accountNames($financialAccounts);
 
-        return view('accounting.reports.book', compact('kind', 'financialAccounts', 'lines'));
+        return view('accounting.reports.book', compact('kind', 'financialAccounts', 'lines', 'accountNames'));
     }
 
     public function exportBook(Request $request, BranchAccess $access, LedgerReportTables $tables, ReportExporter $exporter, string $kind, string $format): StreamedResponse|RedirectResponse
     {
         abort_unless(in_array($kind, ['cash', 'bank'], true) && $request->user()->can($kind.'_books.view') && $request->user()->can('finance_reports.export'), 403);
-        $table = $tables->book($kind, $this->bookLines($request, $access, $this->financialAccounts($request, $access, $kind)), $this->periodMeta($request));
+        $financialAccounts = $this->financialAccounts($request, $access, $kind);
+        $meta = $this->periodMeta($request);
+        if ($request->filled('financial_account_id')) {
+            $selected = $financialAccounts->firstWhere('id', $request->integer('financial_account_id'));
+            $meta['Account'] = $selected ? $selected->name.' — '.$selected->branch->name : '';
+        }
+        $table = $tables->book($kind, $this->bookLines($request, $access, $financialAccounts), $meta, $this->accountNames($financialAccounts));
         if ($table->rows === []) {
             return redirect()->route('reports.books', [...$request->query(), 'kind' => $kind])->with('error', 'There is no posted activity to export.');
         }
@@ -134,16 +141,37 @@ class OperationalReportController extends Controller
 
     /**
      * Posted cash or bank lines in the user's branches; shared by the screen and the export.
+     * A ledger may back one account in each branch, so every line is matched to the account
+     * of its own journal's branch, and an optional filter narrows the book to one account.
      *
      * @param  Collection<int, FinancialAccount>  $financialAccounts
      * @return Builder<JournalLine>
      */
     private function bookLines(Request $request, BranchAccess $access, Collection $financialAccounts): Builder
     {
+        if ($request->filled('financial_account_id')) {
+            $financialAccounts = $financialAccounts->where('id', $request->integer('financial_account_id'));
+            abort_if($financialAccounts->isEmpty(), 404);
+        }
+
         return JournalLine::query()->with(['journalEntry.branch', 'journalEntry.voucherType', 'account'])
             ->whereIn('account_id', $financialAccounts->pluck('account_id'))->whereHas('journalEntry', fn ($q) => $q->where('status', 'posted')->whereIn('branch_id', $access->scope($request->user())->select('id'))
+            ->where(function ($pairs) use ($financialAccounts): void {
+                foreach ($financialAccounts as $account) {
+                    $pairs->orWhere(fn ($pair) => $pair->where('journal_entries.branch_id', $account->branch_id)->where('journal_lines.account_id', $account->account_id));
+                }
+            })
             ->when($request->filled('from'), fn ($q) => $q->whereDate('transaction_date', '>=', $request->date('from')))
             ->when($request->filled('to'), fn ($q) => $q->whereDate('transaction_date', '<=', $request->date('to'))));
+    }
+
+    /**
+     * @param  Collection<int, FinancialAccount>  $financialAccounts
+     * @return array<string, string> Account name keyed by "ledger id:branch id".
+     */
+    private function accountNames(Collection $financialAccounts): array
+    {
+        return $financialAccounts->mapWithKeys(fn (FinancialAccount $account): array => [$account->account_id.':'.$account->branch_id => $account->name])->all();
     }
 
     /** @return Builder<OperationalTransaction> */

@@ -113,6 +113,7 @@ class AccountImportService
         if ($import->status === 'confirmed') {
             throw ValidationException::withMessages(['rows' => 'This preview has already been imported and can no longer be reviewed.']);
         }
+        $this->ensureClassified($import);
         if (! in_array($decision, ['approved', 'excluded', 'pending'], true)) {
             throw ValidationException::withMessages(['decision' => 'Choose approve, exclude or reset.']);
         }
@@ -159,6 +160,8 @@ class AccountImportService
 
     /**
      * Classify previews that were created before review decisions existed.
+     * Called only from the write actions (review decision and confirmation);
+     * previews are classified at upload and the GET pages stay read-only.
      */
     public function ensureClassified(AccountImport $import): void
     {
@@ -226,6 +229,7 @@ class AccountImportService
         if ($import->status === 'confirmed') {
             return 0;
         }
+        $this->ensureClassified($import);
         $query = $rowIds === [] ? $import->rows()->where('review_status', 'approved') : $import->rows()->whereKey($rowIds);
         $rows = $query->reorder()->orderByRaw("CASE level WHEN 'class' THEN 1 WHEN 'group' THEN 2 WHEN 'sub_group' THEN 3 ELSE 4 END")->orderBy('row_number')->get();
         if ($rows->isEmpty()) {
@@ -394,8 +398,8 @@ class AccountImportService
                 $children[$row['parent_code']][] = $index;
             }
         }
-        $ledgerClasses = function (array $row) use ($rows, $children, $entityClass): array {
-            $classes = [];
+        $descendantLedgers = function (array $row) use ($rows, $children): array {
+            $ledgers = [];
             $seen = [];
             $stack = $children[$row['code']] ?? [];
             while ($stack !== []) {
@@ -405,22 +409,27 @@ class AccountImportService
                 }
                 $seen[$index] = true;
                 if ($rows[$index]['level'] === AccountLevel::Ledger->value) {
-                    $classes[] = $entityClass($rows[$index]);
+                    $ledgers[] = $rows[$index];
                 }
                 array_push($stack, ...($children[$rows[$index]['code']] ?? []));
             }
 
-            return $classes;
+            return $ledgers;
         };
+        $isInterUnit = fn (array $row): bool => str_contains(strtolower($row['name'].' '.$row['notes']), 'inter-unit');
 
         $result = [];
         foreach ($rows as $row) {
             $class = $entityClass($row);
             $text = strtolower($row['name'].' '.$row['notes']);
-            $descendants = $row['level'] === AccountLevel::Ledger->value ? [] : $ledgerClasses($row);
+            $ledgers = $row['level'] === AccountLevel::Ledger->value ? [] : $descendantLedgers($row);
+            $descendants = array_map($entityClass, $ledgers);
+            // A heading is never proposed for exclusion while ledgers that do not depend on the two-unit model need it as their parent.
+            $independent = array_values(array_filter($ledgers, fn (array $ledger): bool => ! $isInterUnit($ledger) && blank($ledger['validation_errors'])));
             [$manual, $decision, $reason] = match (true) {
                 filled($row['validation_errors']) => [false, 'exclude', 'Structurally invalid row; it cannot be imported until the workbook is corrected.'],
-                str_contains($text, 'inter-unit') => [true, 'exclude', 'Inter-unit balance between the former School and Rehab Centre entities; it conflicts with the approved single-organisation model.'],
+                $isInterUnit($row) && $independent !== [] => [true, 'include', 'Heading named for inter-unit balances, but it is also the parent of '.implode(', ', array_column($independent, 'code')).', which do not depend on the former two-unit model. Import it unchanged with any of them; a heading cannot be posted to. Only its inter-unit ledgers are proposed for exclusion.'],
+                $isInterUnit($row) => [true, 'exclude', 'Inter-unit balance between the former School and Rehab Centre entities; it conflicts with the approved single-organisation model.'],
                 (bool) preg_match('/owner|private/', $text) => [true, 'review', 'Owner/private-use account; confirm with the accountant whether it applies to FRC.'],
                 str_contains(strtolower((string) $row['notes']), '[confirm]') => [true, 'review', 'Workbook requests confirmation: '.trim((string) $row['notes'])],
                 $class === 'school_only' => [false, 'review', 'Ledger of the former separate School entity. School Readiness Program is a normal FRC service, so this row is not excluded by name; approve it only if the accountant confirms FRC uses it, otherwise exclude it.'],

@@ -44,7 +44,7 @@ class OpeningBalanceImportController extends Controller
 
     public function apply(Request $request, OpeningBalanceImport $openingBalanceImport, OpeningBalanceImportService $service, BranchAccess $access): RedirectResponse
     {
-        abort_unless($request->user()->can('opening_balances.import') && $access->canAccess($request->user(), $openingBalanceImport->branch), 403);
+        abort_unless($request->user()->can('opening_balances.import') && $request->user()->can('opening_balances.prepare') && $access->canAccess($request->user(), $openingBalanceImport->branch), 403);
         $batch = $service->apply($openingBalanceImport, $request->user());
 
         return redirect()->route('opening-balances.show', $batch)->with('status', 'Import applied to draft preparation only; no journal posting occurred.');

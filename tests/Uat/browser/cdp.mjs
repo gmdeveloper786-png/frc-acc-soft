@@ -180,6 +180,14 @@ export class Page {
         })()`);
     }
 
+    /** Put local files into a file input, as a user picking them in the file dialog would. */
+    async setFiles(selector, paths) {
+        const { root } = await this.send('DOM.getDocument', { depth: 1 });
+        const { nodeId } = await this.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+        if (!nodeId) throw new Error(`File input not found: ${selector}`);
+        await this.send('DOM.setFileInputFiles', { nodeId, files: [].concat(paths) });
+    }
+
     async screenshot(path) {
         const { data } = await this.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
         writeFileSync(path, Buffer.from(data, 'base64'));

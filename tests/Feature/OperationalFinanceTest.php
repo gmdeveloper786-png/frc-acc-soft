@@ -187,3 +187,22 @@ test('cash book includes posted activity and excludes drafts', function () {
 
     $this->get(route('reports.books', 'cash'))->assertOk()->assertSee($posted->fresh()->journalEntry->voucher_number)->assertDontSee('DRAFT');
 });
+
+test('a posted cash or bank receipt has a printable receipt limited to its branch', function () {
+    $data = [...operationalPayload($this, OperationalTransactionType::CashReceipt, '2500.0000'), 'contra_account_id' => $this->incomeLedger->id, 'party_name' => 'Synthetic Client'];
+    $draft = app(OperationalTransactionService::class)->create($data, $this->maker);
+    $this->get(route('transactions.acknowledgment', $draft))->assertNotFound();
+
+    $posted = app(OperationalTransactionService::class)->post($draft, $this->maker);
+    $this->get(route('transactions.show', $posted))->assertOk()->assertSee('Print receipt');
+    $this->get(route('transactions.acknowledgment', $posted))->assertOk()
+        ->assertSee('Cash Receipt')->assertSee($posted->journalEntry->voucher_number)->assertSee('Received from')->assertSee('Synthetic Client')->assertSee('2,500.00');
+
+    $expense = app(OperationalTransactionService::class)->create(operationalPayload($this, OperationalTransactionType::Expense), $this->maker);
+    $this->get(route('transactions.acknowledgment', $expense))->assertNotFound();
+
+    $otherBranchUser = User::factory()->create();
+    $otherBranchUser->assignRole(SystemRole::Accountant->value);
+    $otherBranchUser->branches()->attach(Branch::factory()->create(['status' => 'publish']));
+    $this->actingAs($otherBranchUser)->get(route('transactions.acknowledgment', $posted))->assertForbidden();
+});

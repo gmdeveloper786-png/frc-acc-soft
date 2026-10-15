@@ -41,7 +41,7 @@
             <td>@if(!$service->revenue_account_id)<span class="status-badge neutral">Default</span>@elseif($mappings->isUsable($service->revenueAccount,\App\Enums\AccountType::Income))<span class="status-badge success">Valid</span>@else<span class="status-badge danger">Invalid ledger</span>@endif</td>
             @can('account_mappings.manage')
             <td><form class="d-flex gap-2" method="POST" action="{{ route('account-mappings.services.update',$service) }}">@csrf @method('PUT')
-                <select class="form-select" name="account_id" aria-label="Fee income ledger for {{ $service->name }}"><option value="">Use General Fee Income</option>@foreach($incomeAccounts as $account)<option value="{{ $account->id }}" @selected($service->revenue_account_id===$account->id)>{{ $account->code }} — {{ $account->name }}</option>@endforeach</select>
+                <select class="form-select" name="account_id" aria-label="Fee income ledger for {{ $service->name }}"><option value="">Not set: manual fee receipts use General Fee Income; FRC payments stay unposted</option>@foreach($incomeAccounts as $account)<option value="{{ $account->id }}" @selected($service->revenue_account_id===$account->id)>{{ $account->code }} — {{ $account->name }}</option>@endforeach</select>
                 <button class="btn btn-primary">Save</button>
             </form></td>
             @endcan

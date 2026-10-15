@@ -60,7 +60,9 @@ DB::transaction(function (): void {
     $branchA = Branch::query()->create(['frc_branch_id' => 990001, 'name' => 'UAT Branch A', 'city' => 'Lahore', 'status' => 'publish', 'last_synced_at' => now()]);
     $branchB = Branch::query()->create(['frc_branch_id' => 990002, 'name' => 'UAT Branch B', 'city' => 'Karachi', 'status' => 'publish', 'last_synced_at' => now()]);
     $therapy = FrcService::query()->create(['frc_service_id' => 990101, 'name' => 'UAT Speech Therapy', 'status' => 'publish', 'last_synced_at' => now()]);
-    FrcService::query()->create(['frc_service_id' => 990102, 'name' => 'UAT School Readiness Program', 'status' => 'publish', 'last_synced_at' => now()]);
+    $schoolReadiness = FrcService::query()->create(['frc_service_id' => 990102, 'name' => 'UAT School Readiness Program', 'status' => 'publish', 'last_synced_at' => now()]);
+    // Deliberately left without a fee income ledger: its synchronised payments must stay unposted.
+    FrcService::query()->create(['frc_service_id' => 990103, 'name' => 'UAT Quran Teaching', 'status' => 'publish', 'last_synced_at' => now()]);
 
     $users = [];
     foreach ([
@@ -93,7 +95,7 @@ DB::transaction(function (): void {
         ['111', 'UAT Cash and Bank', 'sub_group', '11', 'asset', 'debit'],
         ['11101', 'UAT Cash Branch A', 'ledger', '111', 'asset', 'debit'], ['11102', 'UAT Cash Branch B', 'ledger', '111', 'asset', 'debit'],
         ['11201', 'UAT Bank Branch A', 'ledger', '111', 'asset', 'debit'], ['11202', 'UAT Bank Branch B', 'ledger', '111', 'asset', 'debit'],
-        ['11203', 'UAT Mobile Wallet Clearing', 'ledger', '111', 'asset', 'debit'],
+        ['11203', 'UAT Mobile Wallet Clearing', 'ledger', '111', 'asset', 'debit'], ['11204', 'UAT Petty Cash Branch A', 'ledger', '111', 'asset', 'debit'],
         ['113', 'UAT Receivables', 'sub_group', '11', 'asset', 'debit'], ['11301', 'UAT Client Fees Receivable', 'ledger', '113', 'asset', 'debit'],
         ['12', 'UAT Non-current Assets', 'group', '1', 'asset', 'debit'], ['121', 'UAT Equipment', 'sub_group', '12', 'asset', 'debit'],
         ['12101', 'UAT Therapy Equipment', 'ledger', '121', 'asset', 'debit'], ['12102', 'UAT Accumulated Depreciation', 'ledger', '121', 'asset', 'credit'],
@@ -102,9 +104,10 @@ DB::transaction(function (): void {
         ['21102', 'UAT Salary Payable', 'ledger', '211', 'liability', 'credit'], ['21103', 'UAT Tax Payable', 'ledger', '211', 'liability', 'credit'],
         ['3', 'UAT Fund', 'class', null, 'equity', 'credit'], ['31', 'UAT General Fund', 'group', '3', 'equity', 'credit'],
         ['311', 'UAT Accumulated Fund', 'sub_group', '31', 'equity', 'credit'], ['31101', 'UAT Opening Fund', 'ledger', '311', 'equity', 'credit'],
+        ['31102', 'UAT Accumulated Surplus', 'ledger', '311', 'equity', 'credit'],
         ['4', 'UAT Income', 'class', null, 'income', 'credit'], ['41', 'UAT Service Income', 'group', '4', 'income', 'credit'],
         ['411', 'UAT Fee Income', 'sub_group', '41', 'income', 'credit'], ['41101', 'UAT Fee Income General', 'ledger', '411', 'income', 'credit'],
-        ['41102', 'UAT Speech Therapy Fees', 'ledger', '411', 'income', 'credit'],
+        ['41102', 'UAT Speech Therapy Fees', 'ledger', '411', 'income', 'credit'], ['41103', 'UAT Day Programme Fees', 'ledger', '411', 'income', 'credit'],
         ['412', 'UAT Donations', 'sub_group', '41', 'income', 'credit'], ['41201', 'UAT General Donations', 'ledger', '412', 'income', 'credit'],
         ['41202', 'UAT Zakat Donations', 'ledger', '412', 'income', 'credit'], ['41203', 'UAT New Project Donations', 'ledger', '412', 'income', 'credit'],
         ['5', 'UAT Expenses', 'class', null, 'expense', 'debit'], ['51', 'UAT Operating Expenses', 'group', '5', 'expense', 'debit'],
@@ -124,7 +127,12 @@ DB::transaction(function (): void {
     foreach ([[AccountMappingKey::AccountsReceivable, '11301'], [AccountMappingKey::AccountsPayable, '21101'], [AccountMappingKey::FeeIncomeGeneral, '41101'], [AccountMappingKey::DefaultExpense, '51101'], [AccountMappingKey::SalaryExpense, '51102'], [AccountMappingKey::SalaryPayable, '21102']] as [$key, $code]) {
         $mappings->set($key, $created[$code]->id, $users['admin']);
     }
+    $mappings->set(AccountMappingKey::PettyCash, $created['11204']->id, $users['admin']);
+    if ($accumulated = AccountMappingKey::tryFrom('accumulated_surplus')) {
+        $mappings->set($accumulated, $created['31102']->id, $users['admin']);
+    }
     $mappings->setServiceRevenue($therapy, $created['41102']->id, $users['admin']);
+    $mappings->setServiceRevenue($schoolReadiness, $created['41103']->id, $users['admin']);
     foreach (DonationCategory::query()->get() as $category) {
         $category->update(['income_account_id' => $created[match (true) {
             str_contains(strtolower($category->name), 'zakat') => '41202', str_contains(strtolower($category->name), 'project') => '41203', default => '41201',
@@ -138,5 +146,7 @@ DB::transaction(function (): void {
     Vendor::query()->create(['vendor_code' => 'UAT-V-001', 'name' => 'UAT Medical Supplies Co', 'is_active' => true, 'created_by' => $users['admin']->id]);
     Vendor::query()->create(['vendor_code' => 'UAT-V-002', 'name' => 'UAT Stationers', 'is_active' => true, 'created_by' => $users['admin']->id]);
 });
+
+@unlink(base_path('storage/uat/fake-frc-extra.json')); // the synthetic FRC API starts from its base data set
 
 echo "UAT database {$database} is ready. Users: uat.<role>@uat.test (synthetic password in tests/Uat/README).".PHP_EOL;

@@ -7,12 +7,15 @@ use App\Models\FiscalYear;
 use App\Models\OpeningBalanceBatch;
 use App\Models\User;
 use App\Services\OpeningBalanceImportService;
+use App\Services\OpeningBalancePostingService;
 use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 beforeEach(function () {
     Storage::fake('local');
@@ -77,4 +80,50 @@ test('opening balance workbook is previewed then applied to draft without postin
     expect($import->difference)->toBe('0.00')->and($import->rows->every(fn ($row) => empty($row->validation_errors)))->toBeTrue();
     $batch = $service->apply($import, $this->admin);
     expect($batch->status)->toBe('draft')->and($import->fresh()->status)->toBe('applied');
+});
+
+test('the uploader cannot approve the batch another user applied from the import', function () {
+    $debit = Account::factory()->create(['code' => '111001']);
+    $credit = Account::factory()->create(['code' => '211001', 'account_type' => 'liability', 'normal_balance' => 'credit']);
+    $uploader = User::factory()->create();
+    $uploader->assignRole(SystemRole::Administrator->value);
+    $uploader->branches()->attach($this->branch);
+    $checker = User::factory()->create();
+    $checker->assignRole(SystemRole::Administrator->value);
+    $checker->branches()->attach($this->branch);
+    $service = app(OpeningBalanceImportService::class);
+    $import = $service->preview(openingRowsUpload([[$debit->code, '40.00', '0', 'TB-1'], [$credit->code, '0', '40.00', 'TB-1']]), [
+        'fiscal_year_id' => $this->year->id, 'branch_id' => $this->branch->id, 'opening_date' => '2026-01-01',
+    ], $uploader);
+    $batch = $service->apply($import, $this->admin);
+
+    expect(fn () => app(OpeningBalancePostingService::class)->approve($batch, $uploader))->toThrow(ValidationException::class, 'separate authorized user')
+        ->and(fn () => app(OpeningBalancePostingService::class)->approve($batch, $this->admin))->toThrow(ValidationException::class, 'separate authorized user');
+    $this->actingAs($uploader)->post(route('opening-balances.approve', $batch))->assertSessionHasErrors('status');
+    expect($batch->fresh()->status)->toBe('draft')
+        ->and(app(OpeningBalancePostingService::class)->approve($batch, $checker)->status)->toBe('approved');
+});
+
+test('applying an import needs the prepare permission and cannot run twice', function () {
+    $debit = Account::factory()->create(['code' => '111001']);
+    $credit = Account::factory()->create(['code' => '211001', 'account_type' => 'liability', 'normal_balance' => 'credit']);
+    $service = app(OpeningBalanceImportService::class);
+    $import = $service->preview(openingRowsUpload([[$debit->code, '10.00', '0', 'TB-1'], [$credit->code, '0', '10.00', 'TB-1']]), [
+        'fiscal_year_id' => $this->year->id, 'branch_id' => $this->branch->id, 'opening_date' => '2026-01-01',
+    ], $this->admin);
+    $importer = User::factory()->create();
+    $importer->givePermissionTo(['opening_balances.import', 'opening_balances.view']);
+    $importer->branches()->attach($this->branch);
+
+    $this->actingAs($importer)->post(route('opening-balance-imports.apply', $import))->assertForbidden();
+    expect(fn () => $service->apply($import, $importer))->toThrow(HttpException::class)
+        ->and(OpeningBalanceBatch::query()->count())->toBe(0)
+        ->and($import->fresh()->status)->toBe('preview');
+
+    $importer->givePermissionTo('opening_balances.prepare');
+    $this->actingAs($importer->fresh())->post(route('opening-balance-imports.apply', $import))->assertRedirect();
+    // A stale copy of the import still reports "preview"; the locked re-read refuses it.
+    expect($import->status)->toBe('preview')
+        ->and(fn () => $service->apply($import, $this->admin))->toThrow(ValidationException::class, 'already applied')
+        ->and(OpeningBalanceBatch::query()->count())->toBe(1);
 });

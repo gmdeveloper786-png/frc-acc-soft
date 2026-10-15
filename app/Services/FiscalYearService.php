@@ -12,7 +12,7 @@ use Illuminate\Validation\ValidationException;
 
 class FiscalYearService
 {
-    public function __construct(private AuditLogger $audit) {}
+    public function __construct(private AuditLogger $audit, private YearEndClosingService $closing) {}
 
     /** @param array{name:string,start_date:string,end_date:string} $data */
     public function create(array $data, User $actor): FiscalYear
@@ -62,12 +62,15 @@ class FiscalYearService
         if ($year->status !== FiscalYearStatus::Open) {
             throw ValidationException::withMessages(['status' => 'Only an open fiscal year can be closed.']);
         }
+        if ($this->closing->hasUnclosedBalance($year)) {
+            throw ValidationException::withMessages(['closing' => 'Post the year-end closing entry before closing the fiscal year.']);
+        }
         if ($year->periods()->where('status', '!=', AccountingPeriodStatus::Closed->value)->exists()) {
             throw ValidationException::withMessages(['periods' => 'Close every accounting period before closing the fiscal year.']);
         }
         DB::transaction(function () use ($year, $actor): void {
             $year->update(['status' => FiscalYearStatus::Closed, 'is_current' => false, 'closed_by' => $actor->id, 'closed_at' => now()]);
-            $this->audit->log('fiscal_year.closed', $year, ['journal_engine_check' => 'pending_milestone_4']);
+            $this->audit->log('fiscal_year.closed', $year, ['year_end_closing_check' => 'income_and_expenditure_closed']);
         });
     }
 

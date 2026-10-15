@@ -39,7 +39,7 @@ class BranchIncomeExpenditureStatement
 
         $movements = [];
         $types = [AccountType::Income, AccountType::Expense];
-        foreach ($this->reader->totals($scope->branchIds(), $period['from'], $period['to'], $types, LedgerActivityReader::BY_BRANCH) as $row) {
+        foreach ($this->reader->totals($scope->branchIds(), $period['from'], $period['to'], $types, LedgerActivityReader::BY_BRANCH, excludeClosing: true) as $row) {
             $movements[$row['account_id']]['branch_'.$row['dimension']] = $row['net'];
             // The total is the sum of the branch columns shown, nothing else.
             $movements[$row['account_id']][self::TOTAL] = ($movements[$row['account_id']][self::TOTAL] ?? $zero)->plus($row['net']);

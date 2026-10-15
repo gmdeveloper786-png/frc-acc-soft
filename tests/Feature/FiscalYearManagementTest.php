@@ -38,3 +38,16 @@ test('only an open year can become current and only one current year remains', f
 test('unauthorized fiscal year access is rejected', function () {
     $this->actingAs(User::factory()->create())->get(route('fiscal-years.index'))->assertForbidden();
 });
+
+test('the fiscal year list renders open years with the year-end closing link', function () {
+    FiscalYear::factory()->create(['name' => 'FY 2031', 'start_date' => '2031-01-01', 'end_date' => '2031-12-31', 'status' => 'open']);
+    FiscalYear::factory()->create(['name' => 'FY 2032', 'start_date' => '2032-01-01', 'end_date' => '2032-12-31', 'status' => 'draft']);
+
+    $this->actingAs($this->admin)->get(route('fiscal-years.index'))->assertOk()
+        ->assertSeeInOrder(['FY 2031', 'Year-end closing'])
+        ->assertSee('FY 2032');
+});
+
+test('the journal list renders its page actions', function () {
+    $this->actingAs($this->admin)->get(route('journals.index'))->assertOk()->assertSee('New Journal');
+});

@@ -81,7 +81,7 @@ class PurchaseOrderService
             $order->update([...$this->headerAttributes($data), ...$computed['totals'], 'branch_id' => $branch->id, 'status' => PurchaseOrderStatus::Draft, 'rejection_reason' => null]);
             $order->lines()->createMany($computed['lines']);
             $this->record($order, 'updated', $from, $actor, "Total changed from {$previousTotal} to {$order->total_amount}.");
-            $this->audit->log('purchase_orders.updated', $order, ['po_number' => $order->po_number, 'previous_total' => $previousTotal, 'total_amount' => $order->total_amount]);
+            $this->audit->log('purchase_orders.updated', $order, ['po_number' => $order->po_number, 'previous_total' => $previousTotal, 'total_amount' => $order->total_amount], $actor);
 
             return $order->load('lines');
         });
@@ -151,7 +151,7 @@ class PurchaseOrderService
     public function canApprove(PurchaseOrder $order, User $actor): bool
     {
         return $order->status === PurchaseOrderStatus::Submitted
-            && ! in_array($actor->id, [$order->created_by, $order->submitted_by], true)
+            && ! in_array($actor->id, [$order->created_by, $order->submitted_by, ...$this->editors($order)], true)
             && $this->approvalBasis($order, $actor) !== null;
     }
 
@@ -336,6 +336,15 @@ class PurchaseOrderService
         if (in_array($actor->id, [$order->created_by, $order->submitted_by], true)) {
             throw ValidationException::withMessages(['approval' => 'The user who created or submitted a purchase order cannot approve or reject it.']);
         }
+        if (in_array($actor->id, $this->editors($order), true)) {
+            throw ValidationException::withMessages(['approval' => 'You edited this purchase order, so another user must approve it.']);
+        }
+    }
+
+    /** @return list<int> Users who changed the order while it was a draft. */
+    private function editors(PurchaseOrder $order): array
+    {
+        return $this->audit->actorIds($order, ['purchase_orders.updated']);
     }
 
     /** Header totals must still equal the stored lines and the vendor must be usable. */

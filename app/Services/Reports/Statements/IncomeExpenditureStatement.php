@@ -14,7 +14,7 @@ use Brick\Math\BigDecimal;
  */
 class IncomeExpenditureStatement
 {
-    public const METHOD = 'Accrual basis. Posted journals only (drafts, submitted and approved-but-unposted journals are excluded), by transaction date. Income = credits minus debits; expenses = debits minus credits. Parent accounts are rollups of their ledgers.';
+    public const METHOD = 'Accrual basis. Posted journals only (drafts, submitted and approved-but-unposted journals are excluded), by transaction date. Income = credits minus debits; expenses = debits minus credits. Parent accounts are rollups of their ledgers. Year-end closing journals (and their reversals) are excluded, so a closed year still shows its income and expenditure.';
 
     public function __construct(private LedgerActivityReader $reader, private AccountTree $tree, private StatementPeriod $periods) {}
 
@@ -32,7 +32,7 @@ class IncomeExpenditureStatement
 
         $types = [AccountType::Income, AccountType::Expense];
         $movements = [];
-        foreach ($this->reader->totals($scope->branchIds(), $period['from'], $period['to'], $types) as $row) {
+        foreach ($this->reader->totals($scope->branchIds(), $period['from'], $period['to'], $types, excludeClosing: true) as $row) {
             $movements[$row['account_id']]['current'] = $row['net'];
         }
 
@@ -40,7 +40,7 @@ class IncomeExpenditureStatement
         $comparative = null;
         $notice = $period['comparative_notice'];
         if ($period['comparative'] !== null) {
-            $previous = $this->reader->totals($scope->branchIds(), $period['comparative']['from'], $period['comparative']['to'], $types);
+            $previous = $this->reader->totals($scope->branchIds(), $period['comparative']['from'], $period['comparative']['to'], $types, excludeClosing: true);
             if ($previous === []) {
                 // A comparison with nothing posted would be a column of invented zeros.
                 $notice = 'No posted income or expenditure exists for '.$period['comparative']['label'].', so no comparison is shown.';

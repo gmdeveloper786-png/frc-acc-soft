@@ -41,7 +41,7 @@ class ServiceAnalysisStatement
 
         // $amounts[income|expense][service id, 0 = no service][account id] = presentation amount
         $amounts = [AccountType::Income->value => [], AccountType::Expense->value => []];
-        foreach ($this->reader->totals($scope->branchIds(), $period['from'], $period['to'], [AccountType::Income, AccountType::Expense], LedgerActivityReader::BY_SERVICE) as $row) {
+        foreach ($this->reader->totals($scope->branchIds(), $period['from'], $period['to'], [AccountType::Income, AccountType::Expense], LedgerActivityReader::BY_SERVICE, excludeClosing: true) as $row) {
             $type = $accounts[$row['account_id']]->account_type;
             $amounts[$type->value][$row['dimension'] ?? 0][$row['account_id']] = $type === AccountType::Income ? $row['net']->negated() : $row['net'];
         }

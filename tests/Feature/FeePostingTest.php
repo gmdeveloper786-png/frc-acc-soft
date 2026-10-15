@@ -24,6 +24,7 @@ use App\Models\User;
 use App\Models\VoucherType;
 use App\Services\FeePosting\FeePostingEligibility;
 use App\Services\FeePosting\FeePostingService;
+use App\Services\FeePosting\FeeSettlementMappingService;
 use App\Services\TrialBalanceService;
 use Database\Factories\FrcEnrollmentFactory;
 use Database\Factories\FrcPaymentFactory;
@@ -216,12 +217,54 @@ test('missing configuration blocks posting with the precise reason', function (C
     'flagged for review' => [fn ($test, $payment) => $payment->update(['posting_status' => 'needs_review']), 'needs_review'],
 ]);
 
-test('a service without its own ledger falls back to general fee income', function () {
-    $payment = feepostPayment($this, ['service_id' => $this->otherService->id]);
-    $posting = feepostService()->postPayment($payment, $this->poster);
-    expect($posting->journalEntry->lines[1]->account_id)->toBe($this->generalIncome->id)
-        ->and($posting->journalEntry->lines[1]->service_id)->toBe($this->otherService->id);
+test('a synchronised payment of a service without its own fee income ledger stays unposted', function () {
+    $quran = FrcService::factory()->create(['name' => 'Quran Teaching']);
+    $payment = feepostPayment($this, ['service_id' => $quran->id, 'amount' => '2500.0000']);
+
+    $plan = app(FeePostingEligibility::class)->forPayment($payment->fresh(), $this->poster);
+    expect($plan->has('fee_income_mapping'))->toBeTrue()
+        ->and($plan->reasons['fee_income_mapping'])->toContain('Quran Teaching has no fee income ledger')->toContain('General Fee Income is not used');
+
+    $results = feepostService()->postBatch('payment', [$payment->id], $this->poster);
+    expect($results[$payment->id]['status'])->toBe('skipped')
+        ->and($payment->fresh()->posting_status)->toBe('unposted')
+        ->and(JournalEntry::query()->count())->toBe(0)
+        ->and(JournalLine::query()->where('account_id', $this->generalIncome->id)->exists())->toBeFalse();
+
+    $this->get(route('fee-posting.payments.index'))->assertOk()->assertSee('Quran Teaching has no fee income ledger');
 });
+
+test('school readiness posts to its own mapped ledger with branch and service attribution, once', function () {
+    $dayProgramme = Account::factory()->create(['code' => '42105', 'name' => 'Day Programme Fees', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
+    $schoolReadiness = FrcService::factory()->create(['name' => 'School Readiness Program', 'revenue_account_id' => $dayProgramme->id]);
+    $payment = feepostPayment($this, ['service_id' => $schoolReadiness->id, 'amount' => '5000.0000']);
+
+    $journal = feepostService()->postPayment($payment, $this->poster)->journalEntry;
+    expect($journal->branch_id)->toBe($this->branch->id)
+        ->and($journal->lines[1]->account_id)->toBe($dayProgramme->id)
+        ->and($journal->lines[1]->service_id)->toBe($schoolReadiness->id)
+        ->and($journal->lines[1]->credit)->toBe('5000.0000')
+        ->and(feepostNetCredit($dayProgramme, $schoolReadiness->id))->toBe('5000.00');
+
+    $again = feepostService()->postBatch('payment', [$payment->id], $this->poster);
+    expect($again[$payment->id]['status'])->toBe('skipped')
+        ->and(JournalEntry::query()->count())->toBe(1)
+        ->and(JournalLine::query()->where('account_id', $this->generalIncome->id)->exists())->toBeFalse();
+});
+
+test('a service fee income ledger that is not an active postable income account blocks posting', function (Closure $ledger) {
+    $service = FrcService::factory()->create(['name' => 'Group Therapy', 'revenue_account_id' => $ledger()->id]);
+    $payment = feepostPayment($this, ['service_id' => $service->id]);
+
+    $plan = app(FeePostingEligibility::class)->forPayment($payment->fresh(), $this->poster);
+    expect($plan->reasons['fee_income_mapping'] ?? '')->toContain('Group Therapy is not an active, postable income account');
+    expect(feepostService()->postBatch('payment', [$payment->id], $this->poster)[$payment->id]['status'])->toBe('skipped')
+        ->and(JournalEntry::query()->count())->toBe(0);
+})->with([
+    'an expense ledger' => [fn () => Account::factory()->create(['code' => '53101', 'account_type' => 'expense', 'normal_balance' => 'debit', 'financial_statement' => 'income_expenditure'])],
+    'an inactive income ledger' => [fn () => Account::factory()->create(['code' => '42199', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure', 'is_active' => false])],
+    'a non-postable income heading' => [fn () => Account::factory()->create(['code' => '421', 'level' => 'sub_group', 'is_postable' => false, 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure'])],
+]);
 
 test('accrual basis recognises income once from the enrollment and settles receivable from payments', function () {
     feepostSetting('fees.accounting_basis', 'accrual');
@@ -391,6 +434,8 @@ test('posting is limited to the actor branches', function () {
 });
 
 test('service-wise and branch-wise income are correct and the trial balance balances after a mixed batch', function () {
+    $occupationalIncome = Account::factory()->create(['code' => '411002', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
+    $this->otherService->update(['revenue_account_id' => $occupationalIncome->id]);
     $speechMain = feepostPayment($this, ['amount' => '3000.0000']);
     $speechMainBank = feepostPayment($this, ['amount' => '2000.0000', 'payment_method' => 'easypaisa']);
     $occupationalMain = feepostPayment($this, ['amount' => '1500.0000', 'service_id' => $this->otherService->id]);
@@ -405,7 +450,8 @@ test('service-wise and branch-wise income are correct and the trial balance bala
 
     $speechIncome = (float) feepostNetCredit($this->incomeLedger, $this->service->id);
     expect(number_format($speechIncome, 2, '.', ''))->toBe('9000.00')
-        ->and(feepostNetCredit($this->generalIncome, $this->otherService->id))->toBe('1500.00')
+        ->and(feepostNetCredit($occupationalIncome, $this->otherService->id))->toBe('1500.00')
+        ->and(feepostNetCredit($this->generalIncome))->toBe('0.00')
         ->and(feepostNetCredit($this->incomeLedger, null, $this->branch->id))->toBe('5000.00')
         ->and(feepostNetCredit($this->incomeLedger, null, $this->otherBranch->id))->toBe('4000.00')
         ->and(feepostNetCredit($this->otherCashLedger))->toBe('-4000.00');
@@ -463,4 +509,32 @@ test('the posted receipts list links journals and is branch scoped', function ()
     $accountant->assignRole(SystemRole::Accountant->value);
     $accountant->branches()->attach($this->branch);
     $this->actingAs($accountant)->get(route('fee-posting.postings.index'))->assertOk()->assertSee('FRC-333333')->assertDontSee('FRC-444444');
+});
+
+test('payments of two branches settle into their own cash accounts on one shared organisational ledger', function () {
+    $secondCash = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Cash - Second Branch', 'branch_id' => $this->otherBranch->id, 'account_id' => $this->cashLedger->id]);
+    $settlement = app(FeeSettlementMappingService::class);
+    $settlement->save($this->otherBranch, 'cash', $secondCash->id, $this->poster);
+
+    expect($settlement->accountIssue($this->cash, $this->otherBranch->id, 'cash'))->toContain('belongs to another branch')
+        ->and(fn () => $settlement->save($this->otherBranch, 'cash', $this->cash->id, $this->poster))->toThrow(ValidationException::class);
+
+    $main = feepostService()->postPayment(feepostPayment($this, ['amount' => '3000.0000']), $this->poster)->journalEntry;
+    $second = feepostService()->postPayment(feepostPayment($this, ['amount' => '1200.0000', 'branch_id' => $this->otherBranch->id]), $this->poster)->journalEntry;
+
+    expect($main->branch_id)->toBe($this->branch->id)
+        ->and($main->lines[0]->account_id)->toBe($this->cashLedger->id)
+        ->and($main->lines[0]->debit)->toBe('3000.0000')
+        ->and($second->branch_id)->toBe($this->otherBranch->id)
+        ->and($second->lines[0]->account_id)->toBe($this->cashLedger->id)
+        ->and($second->lines[0]->debit)->toBe('1200.0000');
+
+    $cashFor = function (array $branchIds): string {
+        $report = app(TrialBalanceService::class)->report($this->year->id, '2027-06-30', $branchIds);
+
+        return $report['rows']->first(fn (array $row): bool => $row['account']->id === $this->cashLedger->id)['debit'];
+    };
+    expect($cashFor([$this->branch->id]))->toBe('3000.0000')
+        ->and($cashFor([$this->otherBranch->id]))->toBe('1200.0000')
+        ->and($cashFor([$this->branch->id, $this->otherBranch->id]))->toBe('4200.0000');
 });

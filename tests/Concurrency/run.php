@@ -13,14 +13,22 @@
  */
 
 use App\Enums\AccountingPeriodStatus;
+use App\Enums\AccountMappingKey;
+use App\Enums\DepreciationRunStatus;
 use App\Enums\FiscalYearStatus;
 use App\Enums\JournalStatus;
 use App\Enums\SystemRole;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
+use App\Models\AppSetting;
+use App\Models\AssetCategory;
 use App\Models\Branch;
+use App\Models\DepreciationRun;
+use App\Models\DepreciationRunLine;
+use App\Models\Employee;
 use App\Models\FinancialAccount;
 use App\Models\FiscalYear;
+use App\Models\FixedAsset;
 use App\Models\InventoryBalance;
 use App\Models\InventoryCategory;
 use App\Models\InventoryItem;
@@ -28,16 +36,26 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
+use App\Models\PayrollComponent;
+use App\Models\PayrollRun;
+use App\Models\PayrollRunPayment;
 use App\Models\PurchaseBill;
 use App\Models\PurchaseOrder;
 use App\Models\User;
 use App\Models\Vendor;
 use App\Models\VoucherType;
+use App\Services\AccountMappingService;
+use App\Services\Assets\AssetPolicy;
+use App\Services\Assets\DepreciationRunService;
+use App\Services\Assets\FixedAssetService;
 use App\Services\Inventory\InventoryService;
+use App\Services\Payroll\PayrollRunService;
+use App\Support\AppSettings;
 use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\VoucherTypeSeeder;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -204,6 +222,109 @@ DB::table('purchase_orders')->where('id', $order->id)->update(['status' => 'appr
 $results = $race($actors->take(5)->map(fn (User $actor, int $index): array => ['scenario' => 'purchase_bill', 'arguments' => ['user_id' => $actor->id, 'payload' => ['vendor_id' => $vendor->id, 'branch_id' => $branchA->id, 'payable_account_id' => $payable->id, 'bill_number' => 'RACE-'.$tag.'-'.$index, 'invoice_date' => now()->toDateString(), 'purchase_order_id' => $order->id, 'lines' => [['account_id' => $expense->id, 'description' => 'Concurrent bill', 'quantity' => '1', 'unit_amount' => '40']]]]])->all());
 $billed = (string) PurchaseBill::query()->where('purchase_order_id', $order->id)->sum('total_amount');
 $check('5 concurrent bills of 40 against a purchase order of 100: exactly 2 are accepted (80)', $succeeded($results) === 2 && bccomp($billed, '80', 4) === 0, $succeeded($results).' ok, billed '.$billed.$failures($results));
+
+// --- Payroll salary payments against one posted run ---------------------------------------------
+echo PHP_EOL.'Payroll salary payments'.PHP_EOL;
+foreach ([PayrollRunService::POLICY_SETTING, AssetPolicy::APPROVAL_SETTING] as $key) {
+    // Test fixture: approve the Director policy settings in the disposable database only.
+    AppSetting::query()->where('key', $key)->update(['value' => '1']);
+    Cache::forget(AppSettings::cacheKey($key));
+}
+$payrollService = app(PayrollRunService::class);
+$check('Payroll and depreciation policies are approved in '.$database, str_ends_with((string) DB::connection()->getDatabaseName(), CONCURRENCY_SUFFIX) && $payrollService->policyApproved() && app(AssetPolicy::class)->isApproved());
+$checker = function (Branch $branch): User {
+    $user = User::factory()->create();
+    $user->assignRole(SystemRole::Approver->value);
+    $user->branches()->attach($branch->id);
+
+    return $user;
+};
+$freshBranch = function () use ($actors): Branch {
+    $branch = Branch::factory()->create(['status' => 'publish']);
+    $actors->each(fn (User $actor) => $actor->branches()->attach($branch->id));
+
+    return $branch;
+};
+$mappings = app(AccountMappingService::class);
+$mappings->set(AccountMappingKey::SalaryExpense, Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure'])->id, $actors[0]);
+$mappings->set(AccountMappingKey::SalaryPayable, Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit'])->id, $actors[0]);
+$basic = PayrollComponent::query()->where('code', 'BASIC')->firstOrFail();
+
+/** A posted (accrued) payroll run of one employee with the given net salary, and a cash account of its branch. */
+$postedPayroll = function (string $net) use ($freshBranch, $checker, $actors, $basic, $payrollService, $period): array {
+    $branch = $freshBranch();
+    $employee = Employee::factory()->create(['branch_id' => $branch->id, 'created_by' => $actors[0]->id]);
+    $employee->salaryItems()->create(['payroll_component_id' => $basic->id, 'amount' => $net]);
+    $cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $branch->id, 'account_id' => Account::factory()->create()->id]);
+    $run = $payrollService->createFromStructures(['branch_id' => $branch->id, 'accounting_period_id' => $period->id], $actors[0]);
+    $run = $payrollService->validate($run, $actors[0]);
+    $payrollService->submit($run, $actors[0]);
+    $payrollService->approve($run->fresh(), $checker($branch));
+
+    return [$payrollService->post($run->fresh(), $actors[0]), $cash];
+};
+$payJob = fn (PayrollRun $run, FinancialAccount $cash, User $actor, string $amount, string $reference): array => ['scenario' => 'payroll_pay', 'arguments' => ['user_id' => $actor->id, 'run_id' => $run->id, 'payload' => ['type' => 'cash_payment', 'financial_account_id' => $cash->id, 'amount' => $amount, 'transaction_date' => now()->toDateString(), 'reference_number' => $reference]]];
+/** Linked payments, every payment transaction raised for the run, and the linked total. */
+$payrollPayments = function (PayrollRun $run): array {
+    $linked = PayrollRunPayment::query()->where('payroll_run_id', $run->id)->pluck('operational_transaction_id')->sort()->values();
+    $raised = OperationalTransaction::query()->where('source_reference', 'payroll_run:'.$run->id)->pluck('id')->sort()->values();
+    $total = (string) (OperationalTransaction::query()->whereKey($linked)->sum('amount') ?: '0');
+
+    return [$linked, $raised, $total];
+};
+$losersClean = fn (array $results): bool => collect($results)->where('ok', false)->every(fn (array $result): bool => $result['error'] === 'ValidationException');
+$payrollRace = function (string $label, string $net, string $amount, int $workers, int $allowed, bool $sameActor = false) use ($postedPayroll, $race, $actors, $payJob, $payrollPayments, $payrollService, $succeeded, $losersClean, $failures, $check, $tag): void {
+    [$run, $cash] = $postedPayroll($net);
+    $results = $race(collect(range(0, $workers - 1))->map(fn (int $index): array => $payJob($run, $cash, $actors[$sameActor ? 0 : $index], $amount, $sameActor ? 'SAL-'.$tag : 'SAL-'.$tag.'-'.$index))->all());
+    [$linked, $raised, $total] = $payrollPayments($run);
+    $winners = collect($results)->where('ok', true)->pluck('result')->map(fn ($id): int => (int) $id)->sort()->values();
+    $expected = bcmul($amount, (string) $allowed, 4);
+    $outstanding = $payrollService->outstandingAmount($run->fresh());
+    $check($label, $succeeded($results) === $allowed && $linked->count() === $allowed && $raised->all() === $linked->all() && $winners->all() === $linked->all() && bccomp($total, $expected, 4) === 0 && bccomp($total, $net, 4) <= 0 && $losersClean($results) && bccomp($outstanding, bcsub($net, $expected, 4), 4) === 0,
+        $succeeded($results).' ok, '.$linked->count().' linked / '.$raised->count().' raised payment(s), paid '.$total.' of net '.$net.', outstanding '.$outstanding.$failures($results));
+};
+for ($round = 1; $round <= $rounds; $round++) {
+    $payrollRace("Round {$round}: 5 concurrent payments of the full net 1000: exactly 1 raised, total never above net", '1000.0000', '1000.0000', 5, 1);
+}
+$payrollRace('3 concurrent payments of 60% (600 of 1000): exactly 1 raised, losers leave no transaction', '1000.0000', '600.0000', 3, 1);
+$payrollRace('4 concurrent payments of 30% (300 of 1000): exactly 3 raised (900), the 4th refused', '1000.0000', '300.0000', 4, 3);
+$payrollRace('Identical full-net payment (same user, same reference) submitted twice at once is raised once', '1000.0000', '1000.0000', 2, 1, true);
+
+// --- Depreciation: posting one approved run, preparing one branch + period -------------------------
+echo PHP_EOL.'Depreciation runs'.PHP_EOL;
+$depreciation = app(DepreciationRunService::class);
+$assetCategory = AssetCategory::factory()->create(['code' => 'CC-'.$tag, 'default_useful_life_months' => 12]);
+$activeAsset = function (Branch $branch) use ($assetCategory, $period, $actors): FixedAsset {
+    $assets = app(FixedAssetService::class);
+    $start = $period->start_date->toDateString();
+    $asset = $assets->register(['name' => 'Concurrency asset', 'category_id' => $assetCategory->id, 'branch_id' => $branch->id, 'acquisition_date' => $start, 'in_service_date' => $start, 'acquisition_cost' => '12000.0000', 'residual_value' => '0.0000', 'useful_life_months' => 12, 'opening_accumulated_depreciation' => '0.0000', 'location' => 'Store', 'custodian' => 'Harness'], $actors[0]);
+
+    return $assets->activate($asset, $actors[0]);
+};
+$activeLines = fn (FixedAsset $asset): int => DepreciationRunLine::query()->where('fixed_asset_id', $asset->id)->where('accounting_period_id', $period->id)->where('active_key', DepreciationRunLine::ACTIVE)->count();
+for ($round = 1; $round <= $rounds; $round++) {
+    $branch = $freshBranch();
+    $asset = $activeAsset($branch);
+    $run = $depreciation->prepare($branch->id, $period->id, $actors[0]);
+    $depreciation->submit($run, $actors[0]);
+    $depreciation->approve($run->fresh(), $checker($branch));
+    $results = $race($actors->take(4)->map(fn (User $actor): array => ['scenario' => 'depreciation_post', 'arguments' => ['user_id' => $actor->id, 'run_id' => $run->id]])->all());
+    $journals = JournalEntry::query()->where('source_type', DepreciationRunService::SOURCE_TYPE)->where('source_id', (string) $run->id)->get();
+    $journal = $journals->first();
+    $run = $run->fresh();
+    $check("Round {$round}: the same depreciation run posted by 4 users at once posts exactly one journal and one voucher", $succeeded($results) === 1 && $journals->count() === 1 && $run->status === DepreciationRunStatus::Posted && $run->journal_entry_id === $journal?->id && $journal?->status === JournalStatus::Posted && filled($journal?->voucher_number) && collect($results)->where('ok', true)->pluck('result')->all() === [$journal?->voucher_number] && $activeLines($asset) === 1 && $losersClean($results),
+        $succeeded($results).' ok, '.$journals->count().' journal(s), voucher '.$journals->pluck('voucher_number')->implode(', ').', '.$activeLines($asset).' active line(s) for the asset'.$failures($results));
+
+    $branch = $freshBranch();
+    $asset = $activeAsset($branch);
+    $results = $race($actors->take(4)->map(fn (User $actor): array => ['scenario' => 'depreciation_prepare', 'arguments' => ['user_id' => $actor->id, 'branch_id' => $branch->id, 'period_id' => $period->id]])->all());
+    $runs = DepreciationRun::query()->where('branch_id', $branch->id)->where('accounting_period_id', $period->id)->pluck('id');
+    $check("Round {$round}: 4 concurrent prepares for one branch + period create exactly one run, one line per asset", $succeeded($results) === 1 && $runs->count() === 1 && collect($results)->where('ok', true)->pluck('result')->all() === $runs->all() && $activeLines($asset) === 1 && $losersClean($results),
+        $succeeded($results).' ok, '.$runs->count().' run(s), '.$activeLines($asset).' active line(s) for the asset'.$failures($results));
+}
+$duplicateLines = DepreciationRunLine::query()->where('active_key', DepreciationRunLine::ACTIVE)->select('fixed_asset_id', 'accounting_period_id')->groupBy('fixed_asset_id', 'accounting_period_id')->havingRaw('count(*) > 1')->get();
+$depreciationVouchers = JournalEntry::query()->where('source_type', DepreciationRunService::SOURCE_TYPE)->pluck('voucher_number');
+$check('No asset has two active depreciation lines for one period; depreciation vouchers are distinct', $duplicateLines->isEmpty() && $depreciationVouchers->count() === $rounds && $depreciationVouchers->unique()->count() === $rounds, $duplicateLines->count().' duplicate asset/period pair(s), '.$depreciationVouchers->count().' depreciation voucher(s)');
 
 // --- Constraints that guard the remaining races ---------------------------------------------------
 echo PHP_EOL.'Unique constraints present on MySQL'.PHP_EOL;

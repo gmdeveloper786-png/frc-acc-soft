@@ -34,6 +34,18 @@ node tests/Uat/browser/smoke.mjs [baseUrl] [outputDir]
 
 Results are written to `workflows-results.json` and `smoke-results.json` in the output directory (default `storage/uat/`, git-ignored), with screenshots in `screens/`. MySQL must be running.
 
+### Release UAT (newer modules)
+
+`release.mjs` runs cases RC-01 … RC-13 (COA import, shared cash ledgers, manual/contra journals, receipts/expenses/petty cash with registers and books, inventory, fixed assets and depreciation, budgets, payroll import and payment, FRC incremental changes, authorization by URL, exports, responsive checks, year-end closing). It continues from the state `workflows.mjs` leaves, so run them in this order:
+
+```
+node tests/Uat/browser/workflows.mjs                 # rebuilds the UAT database (setup.php --fresh)
+node tests/Uat/browser/release.mjs [baseUrl] [outputDir] [--reset]
+node tests/Uat/browser/smoke.mjs
+```
+
+`release.mjs` does not reset the database unless `--reset` is passed (then it also runs `setup.php --fresh`, but the cases expect the workflows data first). It generates its synthetic upload workbooks with `php tests/Uat/make-fixtures.php` into `storage/uat/fixtures/`, temporarily writes `storage/uat/fake-frc-extra.json` (a new unmapped-service payment and a refund at the synthetic FRC API) and removes it again, and approves the depreciation and payroll policies as the synthetic UAT Director inside the UAT database. RC-13 posts the FY 2026 year-end closing (it zeroes the year's income and expenditure) and creates FY 2027, so rerun `workflows.mjs` before another release run. Results: `release-results.json`, screenshots `screens/rc-*.png`.
+
 ## 4. Clean up
 
 Stop both `php -S` processes. The UAT database may be dropped at any time; it holds only synthetic data.

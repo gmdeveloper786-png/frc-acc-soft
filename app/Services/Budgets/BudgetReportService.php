@@ -20,6 +20,7 @@ use App\Services\AccountingDecimal;
 use App\Services\AuditLogger;
 use App\Services\BranchAccess;
 use App\Services\Reports\ReportTable;
+use App\Services\Reports\Statements\LedgerActivityReader;
 use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
@@ -295,6 +296,7 @@ class BudgetReportService
             ->whereIn('journal_entries.accounting_period_id', $periodIds)
             ->whereIn('journal_lines.account_id', $accountIds)
             ->when($budget->service_id, fn ($query) => $query->where('journal_lines.service_id', $budget->service_id))
+            ->tap(fn ($query) => LedgerActivityReader::withoutYearEndClosing($query))
             ->groupBy('journal_lines.account_id', 'journal_entries.accounting_period_id')
             ->selectRaw('journal_lines.account_id as account_id, journal_entries.accounting_period_id as period_id, SUM(journal_lines.debit) as debit, SUM(journal_lines.credit) as credit')
             ->get();

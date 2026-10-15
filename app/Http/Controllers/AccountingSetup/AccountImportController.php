@@ -32,7 +32,6 @@ class AccountImportController extends Controller
 
     public function show(Request $request, AccountImport $accountImport, AccountImportService $service): View
     {
-        $service->ensureClassified($accountImport);
         $accountImport->refresh();
         $byCode = $accountImport->rows()->get()->keyBy('code');
         $rows = $accountImport->rows()
@@ -68,7 +67,6 @@ class AccountImportController extends Controller
 
     public function export(AccountImport $accountImport, AccountImportService $service, AuditLogger $audit): StreamedResponse
     {
-        $service->ensureClassified($accountImport);
         $rows = $service->approvalSummary($accountImport);
         $audit->log('account_import.summary_exported', $accountImport, ['rows' => count($rows)]);
 

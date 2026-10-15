@@ -45,7 +45,7 @@ class JournalWorkflowService
             abort_unless($this->branchAccess->canAccess($actor, $branch), 403);
             $journal->update([...$this->header($data), 'status' => JournalStatus::Draft, 'rejection_reason' => null]);
             $this->replaceLines($journal, $data['lines']);
-            $this->audit->log('journal.edited', $journal, ['branch_id' => $branch->id]);
+            $this->audit->log('journal.edited', $journal, ['branch_id' => $branch->id], $actor);
 
             return $journal->load('lines');
         });
@@ -84,6 +84,9 @@ class JournalWorkflowService
             if (in_array($actor->id, [$journal->created_by, $journal->submitted_by], true)) {
                 throw ValidationException::withMessages(['approval' => 'The user who created or submitted a journal cannot approve it.']);
             }
+            if (in_array($actor->id, $this->audit->actorIds($journal, ['journal.edited']), true)) {
+                throw ValidationException::withMessages(['approval' => 'You edited this journal, so another user must approve it.']);
+            }
             $this->validator->validate($journal);
             $journal->update(['status' => JournalStatus::Approved, 'approved_by' => $actor->id, 'approved_at' => now(), 'rejection_reason' => null]);
             $this->audit->log('journal.approved', $journal);
@@ -106,6 +109,29 @@ class JournalWorkflowService
             $this->audit->log('journal.rejected', $journal, ['reason' => $reason]);
 
             return $journal;
+        });
+    }
+
+    /**
+     * Delete a manual journal that was never submitted or was returned. Nothing was posted,
+     * so no financial history is lost; the deletion itself is audited.
+     */
+    public function discard(JournalEntry $journal, User $actor, string $reason): void
+    {
+        abort_unless($actor->can('journals.update'), 403);
+
+        DB::transaction(function () use ($journal, $actor, $reason): void {
+            $journal = JournalEntry::query()->lockForUpdate()->with('lines')->findOrFail($journal->id);
+            abort_unless($this->branchAccess->canAccess($actor, $journal->branch), 403);
+            if (! in_array($journal->status, [JournalStatus::Draft, JournalStatus::Rejected], true) || $journal->voucher_number !== null || filled($journal->source_type)) {
+                throw ValidationException::withMessages(['status' => 'Only a draft or returned manual journal can be discarded.']);
+            }
+            $this->audit->log('journal.discarded', $journal, [
+                'branch_id' => $journal->branch_id, 'transaction_date' => $journal->transaction_date?->toDateString(),
+                'narration' => $journal->narration, 'lines' => $journal->lines->count(), 'reason' => $reason,
+            ], $actor);
+            $journal->lines()->delete();
+            $journal->delete();
         });
     }
 

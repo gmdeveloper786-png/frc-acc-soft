@@ -359,13 +359,13 @@ await runCase(newCase('UAT-03', 'Settlement mapping and cash-basis fee posting',
     const eligible = preview.rows.filter((r) => r.selectable);
     const skipped = preview.rows.filter((r) => !r.selectable);
     check(c, 'Policy approved banner (basis cash)', preview.banners.some((b) => /basis: cash \(approved\)/i.test(b)), preview.banners);
-    check(c, '6 eligible payments with journal lines (Dr cash/bank, Cr fee income)', eligible.length === 6 && eligible.every((r) => /Debit\s*Credit/.test(r.plan) && /^FR/.test(r.plan) && /(11101|11102|11201|11202) — UAT (Cash|Bank)/.test(r.plan) && /4110[12] — /.test(r.plan)), eligible.map((r) => r.receipt));
+    check(c, '6 eligible payments with journal lines (Dr cash/bank, Cr fee income)', eligible.length === 6 && eligible.every((r) => /Debit\s*Credit/.test(r.plan) && /^FR/.test(r.plan) && /(11101|11102|11201|11202) — UAT (Cash|Bank)/.test(r.plan) && /4110[23] — /.test(r.plan)), eligible.map((r) => r.receipt));
     const reasonOf = (frc) => skipped.find((r) => r.receipt.includes(`FRC #${frc}`))?.plan;
     c.evidence.skipReasons = { pending9008: reasonOf(9008), rejected9009: reasonOf(9009), cancelled9010: reasonOf(9010), easypaisaB9007: reasonOf(9007) };
     check(c, 'Skip reasons shown for pending, rejected, cancelled-enrollment, unmapped easypaisa B', ['9008', '9009', '9010', '9007'].every((id) => /Skipped/.test(reasonOf(id) ?? '')), c.evidence.skipReasons);
     const therapyLine = eligible.find((r) => r.receipt.includes('UAT-000001'))?.plan ?? '';
     const generalLine = eligible.find((r) => r.receipt.includes('UAT-000004'))?.plan ?? '';
-    check(c, 'Speech Therapy credits 41102 UAT Speech Therapy Fees; School Readiness credits 41101 UAT Fee Income General', /41102 — UAT Speech Therapy Fees/.test(therapyLine) && /41101 — UAT Fee Income General/.test(generalLine) && /11101 — UAT Cash Branch A/.test(therapyLine), { therapyLine, generalLine });
+    check(c, 'Speech Therapy credits 41102 UAT Speech Therapy Fees; School Readiness credits its own ledger 41103 UAT Day Programme Fees (never General Fee Income)', /41102 — UAT Speech Therapy Fees/.test(therapyLine) && /41103 — UAT Day Programme Fees/.test(generalLine) && !/41101/.test(generalLine) && /11101 — UAT Cash Branch A/.test(therapyLine), { therapyLine, generalLine });
 
     step(c, 'Select all eligible payments and post (confirm accepted)');
     await act(acc, () => { const f = $('form[action$="/fee-posting/payments"]'); $$('input[name="ids[]"]', f).forEach((b) => { b.checked = true; }); submitForm(f, 'Post selected payments'); });
@@ -444,7 +444,7 @@ async function statement(page, path, fields = {}) {
 }
 const rowVal = (table, label, col = 1) => table.rows.find((r) => r[0]?.toLowerCase().includes(label.toLowerCase()))?.[col];
 
-await runCase(newCase('UAT-04', 'Ledger impact of fee posting', 'TB balanced; I&E fee income 18,000 (Speech Therapy 13,000 / General 5,000); branch A 14,000, B 4,000; service analysis and dashboard consistent.'), async (c) => {
+await runCase(newCase('UAT-04', 'Ledger impact of fee posting', 'TB balanced; I&E fee income 18,000 (Speech Therapy 13,000 / Day Programme 5,000); branch A 14,000, B 4,000; service analysis and dashboard consistent.'), async (c) => {
     const acc = await as('accountant');
     step(c, 'Generate Trial Balance FY 2026 as of 31 Dec 2026');
     await go(acc, '/reports/trial-balance');
@@ -461,7 +461,7 @@ await runCase(newCase('UAT-04', 'Ledger impact of fee posting', 'TB balanced; I&
     c.evidence.incomeExpenditureScreenshot = await shot(acc, '04-income-expenditure');
     check(c, 'Total Income 18,000.00', money(rowVal(ie, 'Total Income')) === 18000, rowVal(ie, 'Total Income'));
     check(c, 'UAT Speech Therapy Fees 13,000.00', money(rowVal(ie, 'UAT Speech Therapy Fees')) === 13000, rowVal(ie, 'UAT Speech Therapy Fees'));
-    check(c, 'UAT Fee Income General 5,000.00', money(rowVal(ie, 'UAT Fee Income General')) === 5000, rowVal(ie, 'UAT Fee Income General'));
+    check(c, 'UAT Day Programme Fees 5,000.00', money(rowVal(ie, 'UAT Day Programme Fees')) === 5000, rowVal(ie, 'UAT Day Programme Fees'));
     const ieA = await statement(acc, '/statements/income-expenditure', { branch_id: { text: 'UAT Branch A' } });
     const ieB = await statement(acc, '/statements/income-expenditure', { branch_id: { text: 'UAT Branch B' } });
     c.evidence.ieBranch = { A: rowVal(ieA, 'Total Income'), B: rowVal(ieB, 'Total Income') };

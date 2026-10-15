@@ -54,7 +54,11 @@ class ReceiptsPaymentsService
             }
         }
 
-        $financialAccounts = FinancialAccount::query()->whereIn('account_id', array_keys($movement['cash_accounts']))->get(['account_id', 'name', 'type'])->keyBy('account_id');
+        // A ledger may back one account in each branch: name the row after the account only when exactly one is in scope.
+        $financialAccounts = FinancialAccount::query()->whereIn('account_id', array_keys($movement['cash_accounts']))
+            ->when($branchIds !== null, fn ($query) => $query->whereIn('branch_id', $branchIds))
+            ->get(['account_id', 'name', 'type'])->groupBy('account_id')
+            ->map(fn ($linked) => $linked->count() === 1 ? $linked->first() : (object) ['name' => null, 'type' => $linked->first()->type]);
         $cashAccounts = [];
         foreach ($accounts as $account) {
             $balances = $movement['cash_accounts'][$account->id] ?? null;

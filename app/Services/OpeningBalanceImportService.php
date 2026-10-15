@@ -96,28 +96,56 @@ class OpeningBalanceImportService
         }
     }
 
+    /**
+     * Turn a balanced preview into the draft opening balance batch. Applying
+     * prepares a draft, so it needs the prepare permission as well as import;
+     * the uploader stays a maker of the batch (see OpeningBalancePostingService).
+     */
     public function apply(OpeningBalanceImport $import, User $actor): OpeningBalanceBatch
     {
-        if ($import->status === 'applied') {
-            throw ValidationException::withMessages(['import' => 'This import was already applied.']);
-        }
-        $rows = $import->rows()->get();
-        if ($rows->contains(fn ($row) => ! empty($row->validation_errors))) {
-            throw ValidationException::withMessages(['import' => 'Correct every invalid row before applying this preview.']);
-        }
-        if (BigDecimal::of($import->difference)->compareTo(BigDecimal::zero()) !== 0) {
-            throw ValidationException::withMessages(['import' => 'Opening balance import must be balanced.']);
-        }
-        $batch = $this->balances->saveDraft([
-            'fiscal_year_id' => $import->fiscal_year_id, 'branch_id' => $import->branch_id,
-            'opening_date' => $import->opening_date->toDateString(), 'source_reference' => 'Import #'.$import->id,
-            'lines' => $rows->map(fn ($row) => ['account_id' => $row->account_id, 'debit' => $row->debit, 'credit' => $row->credit, 'source_reference' => $row->source_reference])->all(),
-        ], $actor);
-        DB::transaction(function () use ($import): void {
-            $import->update(['status' => 'applied', 'applied_at' => now()]);
-            $this->audit->log('opening_balance_import.applied', $import, ['journal_posting' => 'not_performed']);
-        });
+        abort_unless($actor->can('opening_balances.import') && $actor->can('opening_balances.prepare'), 403);
 
-        return $batch;
+        return DB::transaction(function () use ($import, $actor): OpeningBalanceBatch {
+            $import = OpeningBalanceImport::query()->lockForUpdate()->findOrFail($import->id);
+            if ($import->status === 'applied') {
+                throw ValidationException::withMessages(['import' => 'This import was already applied.']);
+            }
+            $rows = $import->rows()->get();
+            if ($rows->contains(fn ($row) => ! empty($row->validation_errors))) {
+                throw ValidationException::withMessages(['import' => 'Correct every invalid row before applying this preview.']);
+            }
+            if (BigDecimal::of($import->difference)->compareTo(BigDecimal::zero()) !== 0) {
+                throw ValidationException::withMessages(['import' => 'Opening balance import must be balanced.']);
+            }
+            $batch = $this->balances->saveDraft([
+                'fiscal_year_id' => $import->fiscal_year_id, 'branch_id' => $import->branch_id,
+                'opening_date' => $import->opening_date->toDateString(), 'source_reference' => self::sourceReference($import->id),
+                'lines' => $rows->map(fn ($row) => ['account_id' => $row->account_id, 'debit' => $row->debit, 'credit' => $row->credit, 'source_reference' => $row->source_reference])->all(),
+            ], $actor);
+            $import->update(['status' => 'applied', 'applied_at' => now()]);
+            $this->audit->log('opening_balance_import.applied', $import, ['journal_posting' => 'not_performed', 'opening_balance_batch_id' => $batch->id], $actor);
+
+            return $batch;
+        });
+    }
+
+    /** The batch source reference that links a batch to the import applied to it. */
+    public static function sourceReference(int $importId): string
+    {
+        return 'Import #'.$importId;
+    }
+
+    /**
+     * Uploader of the import whose rows the batch currently holds, if any.
+     */
+    public function uploaderOf(OpeningBalanceBatch $batch): ?int
+    {
+        if (! preg_match('/^Import #(\d+)$/', (string) $batch->source_reference, $matches)) {
+            return null;
+        }
+        $createdBy = OpeningBalanceImport::query()->whereKey((int) $matches[1])->where('fiscal_year_id', $batch->fiscal_year_id)
+            ->where('branch_id', $batch->branch_id)->where('status', 'applied')->value('created_by');
+
+        return $createdBy === null ? null : (int) $createdBy;
     }
 }

@@ -97,8 +97,14 @@ class OperationalTransactionController extends Controller
 
     public function acknowledgment(Request $request, OperationalTransaction $transaction, BranchAccess $access): View
     {
-        abort_unless($transaction->type === OperationalTransactionType::Donation && $transaction->status->value === 'posted', 404);
-        abort_unless($request->user()->can('donations.view') && $access->canAccess($request->user(), $transaction->branch), 403);
+        // A printable receipt exists only for money received: donations and cash or bank receipts, once posted.
+        $permission = match ($transaction->type) {
+            OperationalTransactionType::Donation => 'donations.view',
+            OperationalTransactionType::CashReceipt, OperationalTransactionType::BankReceipt => 'receipts.view',
+            default => null,
+        };
+        abort_unless($permission !== null && $transaction->status->value === 'posted', 404);
+        abort_unless($request->user()->can($permission) && $access->canAccess($request->user(), $transaction->branch), 403);
         $transaction->load(['branch', 'financialAccount', 'donationCategory', 'journalEntry']);
 
         return view('accounting.transactions.donation-receipt', compact('transaction'));

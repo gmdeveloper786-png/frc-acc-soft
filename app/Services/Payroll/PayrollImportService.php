@@ -546,7 +546,7 @@ class PayrollImportService
             $value = $amount($mapping[$field]);
             $stated[$field] = $value === null ? null : AccountingDecimal::string($value);
             if ($value !== null && $valued > 0 && ! $value->isEqualTo($computed)) {
-                $errors[] = ($field === 'stated_gross' ? 'Gross' : 'Net').' stated in the file ('.AccountingDecimal::string($value).') does not equal the '.($field === 'stated_gross' ? 'gross' : 'net').' computed from the mapped components ('.AccountingDecimal::string($computed).').';
+                $errors[] = ($field === 'stated_gross' ? 'Gross' : 'Net').' salary stated in the file does not match the '.($field === 'stated_gross' ? 'gross' : 'net').' salary computed from the mapped components.';
             }
         }
 

@@ -11,8 +11,8 @@ use Illuminate\Validation\ValidationException;
 
 class JournalReversalService
 {
-    /** System journals whose source has no reversal workflow of its own. */
-    private const DIRECTLY_REVERSIBLE_SOURCES = ['opening_balance'];
+    /** System journals whose source has no reversal workflow of its own (opening balances, year-end closing). */
+    private const DIRECTLY_REVERSIBLE_SOURCES = ['opening_balance', YearEndClosingService::SOURCE_TYPE];
 
     public function __construct(private BranchAccess $branchAccess, private JournalPostingService $posting, private AuditLogger $audit) {}
 

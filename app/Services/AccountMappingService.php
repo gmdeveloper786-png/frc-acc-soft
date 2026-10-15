@@ -114,6 +114,25 @@ class AccountMappingService
         return $this->resolve(AccountMappingKey::FeeIncomeGeneral);
     }
 
+    /**
+     * Fee income ledger for a synchronised FRC payment or enrollment: only the service's own
+     * ledger. General Fee Income is deliberately not used, so an unmapped service stays unposted
+     * instead of being credited to whichever ledger happens to be the general one.
+     */
+    public function serviceFeeIncome(int $serviceId): Account
+    {
+        $service = FrcService::query()->with('revenueAccount')->find($serviceId);
+        if (! $service?->revenue_account_id) {
+            $name = $service->name ?? "#{$serviceId}";
+            throw ValidationException::withMessages(['mapping' => "Service {$name} has no fee income ledger. Set it under GL Mapping → Service-specific fee income before posting its FRC payments; General Fee Income is not used for synchronised payments."]);
+        }
+        if (! $this->isUsable($service->revenueAccount, AccountType::Income)) {
+            throw ValidationException::withMessages(['mapping' => "Configuration error: the fee income ledger of service {$service->name} is not an active, postable income account. Correct it under GL Mapping → Service-specific fee income."]);
+        }
+
+        return $service->revenueAccount;
+    }
+
     public function isUsable(?Account $account, AccountType $type): bool
     {
         return $account !== null

@@ -253,7 +253,7 @@ test('invalid, negative, over-precise and inconsistent amounts are row errors', 
     expect(payrollImportErrors($import, 2))->toContain('Gross Salary: the value is not a valid number.')
         ->and(payrollImportErrors($import, 3))->toContain('Advance Salary: negative amounts are not allowed.')
         ->and(payrollImportErrors($import, 4))->toContain('Gross Salary: amounts may have at most four decimals.')
-        ->and(collect(payrollImportErrors($import, 5))->contains(fn (string $error) => str_contains($error, 'Net stated in the file (900.0000) does not equal the net computed from the mapped components (850.0000)')))->toBeTrue()
+        ->and(payrollImportErrors($import, 5))->toContain('Net salary stated in the file does not match the net salary computed from the mapped components.')
         ->and(payrollImportErrors($import, 6))->toContain('No mapped payroll component has a value in this row.')
         ->and(payrollImportErrors($import, 7))->toContain('Net pay is negative: deductions exceed earnings.')
         ->and(payrollImportErrors($import, 8))->toContain('Income Tax: a value is required by the column mapping but the cell is empty.')
@@ -274,7 +274,7 @@ test('stated gross and an optional date column are checked', function () {
 
     expect(payrollImportErrors($import, 2))->toBe([])
         ->and($import->rows()->where('row_number', 2)->first()->mapped_values['pay_date'])->toBe('2026-01-31')
-        ->and(collect(payrollImportErrors($import, 3))->contains(fn (string $error) => str_contains($error, 'Gross stated in the file (1600.0000) does not equal the gross computed from the mapped components (1500.0000)')))->toBeTrue()
+        ->and(payrollImportErrors($import, 3))->toContain('Gross salary stated in the file does not match the gross salary computed from the mapped components.')
         ->and(payrollImportErrors($import, 3))->toContain('Pay Date: the value is not a valid date.')
         ->and($import->rows()->where('row_number', 4)->first()->mapped_values['pay_date'])->toBe('2026-01-31');
 });
@@ -477,6 +477,23 @@ test('spreadsheet values are hidden from an importer without the sensitive permi
     $this->actingAs($importer)->get(route('payroll-imports.show', $import))->assertOk()->assertSee('Gross Salary')->assertSee('Cell values hidden')->assertDontSee('43210.5');
     $this->actingAs($importer)->get(route('payroll-imports.report', $import))->assertOk()->assertSee('EMP-T001')->assertDontSee('43,210.50');
     $this->actingAs($this->maker)->get(route('payroll-imports.report', $import))->assertOk()->assertSee('43,210.50');
+});
+
+test('a stated salary mismatch shows no amount to an importer without the sensitive permission', function () {
+    $import = payrollImportValidated($this, [['EMP-T001', 'Test Person One', 47123.25, 0, 1000, 0, 48765.75]]);
+    $importer = User::factory()->create();
+    $importer->givePermissionTo(['payroll.import', 'payroll.view']);
+    $importer->branches()->attach($this->branch);
+    $message = 'Net salary stated in the file does not match the net salary computed from the mapped components.';
+
+    expect(payrollImportErrors($import, 2))->toBe([$message]);
+    $page = $this->actingAs($importer)->get(route('payroll-imports.report', $import))->assertOk()->assertSee($message);
+    $csv = $this->actingAs($importer)->get(route('payroll-imports.export', $import))->assertOk()->streamedContent();
+    foreach (['48765', '48,765', '46123', '46,123', '47123', '47,123'] as $amount) {
+        $page->assertDontSee($amount);
+        expect($csv)->not->toContain($amount);
+    }
+    expect($csv)->toContain($message);
 });
 
 test('cancelling an import removes its file and rows', function () {

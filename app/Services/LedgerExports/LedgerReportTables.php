@@ -68,7 +68,23 @@ class LedgerReportTables
                 ...($account->level === AccountLevel::Ledger ? [] : ['_style' => 'heading']),
             ];
         }
+        $priorUnclosed = AccountingDecimal::of($report['prior_unclosed'] ?? '0');
+        if (! $priorUnclosed->isZero()) {
+            $zero = AccountingDecimal::string(BigDecimal::zero()->toScale(4));
+            $rows[] = [
+                'code' => '', 'name' => 'Surplus/(deficit) of earlier years not yet closed', 'level' => 'Computed',
+                'debit' => $priorUnclosed->isPositive() ? AccountingDecimal::string($priorUnclosed) : $zero,
+                'credit' => $priorUnclosed->isNegative() ? AccountingDecimal::string($priorUnclosed->abs()) : $zero,
+                '_style' => 'subtotal',
+            ];
+        }
         $rows[] = ['code' => 'Grand totals (ledgers only)', 'name' => '', 'level' => '', 'debit' => $report['total_debit'], 'credit' => $report['total_credit'], '_style' => 'total'];
+        $notes = [$report['balanced']
+            ? 'Parent balances roll up from ledger accounts; grand totals count each ledger once.'
+            : 'Accounting integrity warning: Trial Balance difference is '.$report['difference'].'.'];
+        if ($report['carried_forward'] ?? false) {
+            $notes[] = 'Balance-sheet balances include amounts carried forward from earlier fiscal years; income and expenditure show the selected year only.';
+        }
 
         return new ReportTable('Trial Balance', [
             ['key' => 'code', 'label' => 'Account Code'],
@@ -76,16 +92,15 @@ class LedgerReportTables
             ['key' => 'level', 'label' => 'Level'],
             ['key' => 'debit', 'label' => 'Debit Balance', 'type' => 'money'],
             ['key' => 'credit', 'label' => 'Credit Balance', 'type' => 'money'],
-        ], $rows, $meta, $report['balanced']
-            ? 'Parent balances roll up from ledger accounts; grand totals count each ledger once.'
-            : 'Accounting integrity warning: Trial Balance difference is '.$report['difference'].'.');
+        ], $rows, $meta, implode(' ', $notes));
     }
 
     /**
      * @param  Builder<JournalLine>  $lines  The unordered, scoped query behind the book screen.
      * @param  array<string, string>  $meta
+     * @param  array<string, string>  $accountNames  Cash/bank account name keyed by "ledger id:branch id".
      */
-    public function book(string $kind, Builder $lines, array $meta): ReportTable
+    public function book(string $kind, Builder $lines, array $meta, array $accountNames = []): ReportTable
     {
         $totalDebit = BigDecimal::zero()->toScale(4);
         $totalCredit = BigDecimal::zero()->toScale(4);
@@ -97,7 +112,7 @@ class LedgerReportTables
                 'date' => $line->journalEntry->transaction_date->format('d M Y'),
                 'voucher' => $line->journalEntry->voucher_number,
                 'branch' => $line->journalEntry->branch->name,
-                'account' => $line->account->name,
+                'account' => $accountNames[$line->account_id.':'.$line->journalEntry->branch_id] ?? $line->account->name,
                 'narration' => $line->description,
                 'debit' => $line->debit,
                 'credit' => $line->credit,

@@ -310,3 +310,25 @@ test('unauthorized journal routes are rejected server side', function () {
     $this->actingAs($user)->get(route('reports.trial-balance'))->assertForbidden();
     $this->actingAs($user)->get(route('voucher-types.index'))->assertForbidden();
 });
+
+test('a draft journal can be discarded with a reason but a posted one cannot', function () {
+    $this->actingAs($this->maker);
+    $draft = app(JournalWorkflowService::class)->create(validJournalPayload($this), $this->maker);
+
+    $this->get(route('journals.show', $draft))->assertOk()->assertSee('Discard Draft');
+    $this->delete(route('journals.destroy', $draft), ['reason' => 'x'])->assertSessionHasErrors('reason');
+    $this->delete(route('journals.destroy', $draft), ['reason' => 'Entered twice by mistake'])->assertRedirect(route('journals.index'));
+
+    expect(JournalEntry::query()->whereKey($draft->id)->exists())->toBeFalse()
+        ->and(AuditLog::query()->where('event', 'journal.discarded')->where('auditable_id', $draft->id)->value('properties')['reason'])->toBe('Entered twice by mistake');
+
+    $posted = app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    $this->actingAs($this->maker)->delete(route('journals.destroy', $posted), ['reason' => 'Trying to remove history'])->assertSessionHasErrors('status');
+    expect(JournalEntry::query()->whereKey($posted->id)->exists())->toBeTrue();
+
+    $outsider = User::factory()->create();
+    $outsider->assignRole(SystemRole::Accountant->value);
+    $outsider->branches()->attach(Branch::factory()->create());
+    $other = app(JournalWorkflowService::class)->create(validJournalPayload($this), $this->maker);
+    $this->actingAs($outsider)->delete(route('journals.destroy', $other), ['reason' => 'Not my branch at all'])->assertForbidden();
+});

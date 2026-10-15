@@ -17,8 +17,11 @@
 <div class="surface-card">
     <h2 class="section-title">{{ $report['fiscal_year']->name }} as of {{ request('as_of') }}</h2>
     @unless($report['balanced'])<div class="alert alert-danger">Accounting integrity warning: Trial Balance difference is {{ $report['difference'] }}.</div>@endunless
+    @if($report['carried_forward'] ?? false)<div class="alert alert-info">Balance-sheet balances include amounts carried forward from earlier fiscal years. Income and expenditure show {{ $report['fiscal_year']->name }} only.</div>@endif
     <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Account Code</th><th>Account Name</th><th>Level</th><th class="text-end">Debit Balance</th><th class="text-end">Credit Balance</th></tr></thead><tbody>
         @foreach($report['rows'] as $row)<tr><td>{{ $row['account']->code }}</td><td style="padding-left: {{ match($row['account']->level->value) {'class' => 0, 'group' => 16, 'sub_group' => 32, default => 48} }}px">{{ $row['account']->name }}</td><td>{{ str($row['account']->level->value)->headline() }}</td><td class="text-end font-monospace">{{ $row['debit'] }}</td><td class="text-end font-monospace">{{ $row['credit'] }}</td></tr>@endforeach
+        @php($priorUnclosed = \Brick\Math\BigDecimal::of($report['prior_unclosed'] ?? '0'))
+        @unless($priorUnclosed->isZero())<tr><td></td><td>Surplus/(deficit) of earlier years not yet closed<span class="table-subtext">Computed: income less expenditure of earlier years with no closing entry posted</span></td><td>Computed</td><td class="text-end font-monospace">{{ $priorUnclosed->isPositive() ? $report['prior_unclosed'] : '0.0000' }}</td><td class="text-end font-monospace">{{ $priorUnclosed->isNegative() ? (string) $priorUnclosed->abs() : '0.0000' }}</td></tr>@endunless
     </tbody><tfoot><tr><th colspan="3">Grand totals (ledgers only)</th><th class="text-end font-monospace">{{ $report['total_debit'] }}</th><th class="text-end font-monospace">{{ $report['total_credit'] }}</th></tr></tfoot></table></div>
 </div>
 @endif

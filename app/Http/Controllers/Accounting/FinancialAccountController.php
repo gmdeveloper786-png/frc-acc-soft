@@ -6,10 +6,13 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreFinancialAccountRequest;
 use App\Models\Account;
 use App\Models\FinancialAccount;
+use App\Services\AccountingDecimal;
 use App\Services\AuditLogger;
 use App\Services\BranchAccess;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
@@ -23,8 +26,9 @@ class FinancialAccountController extends Controller
             ->when($request->filled('status'), fn ($q) => $q->where('is_active', $request->string('status') === 'active'))
             ->when($request->filled('search'), fn ($q) => $q->where(fn ($q) => $q->where('name', 'like', '%'.$request->string('search').'%')->orWhere('bank_name', 'like', '%'.$request->string('search').'%')))
             ->orderBy('name')->paginate(20)->withQueryString();
+        $balances = $this->balances($accounts->getCollection());
 
-        return view('accounting.financial-accounts.index', compact('accounts'));
+        return view('accounting.financial-accounts.index', compact('accounts', 'balances'));
     }
 
     public function create(Request $request, BranchAccess $access): View
@@ -65,7 +69,8 @@ class FinancialAccountController extends Controller
         }
         // Once money has moved through the account its ledger, branch and type are frozen:
         // relinking would rewrite history and take the old ledger out of the cash/bank controls.
-        $used = $financialAccount->transactions()->exists() || DB::table('journal_lines')->where('account_id', $financialAccount->account_id)->exists();
+        // A ledger may be shared by branches, so only this branch's postings make this account used.
+        $used = $financialAccount->transactions()->exists() || $this->postedLines(collect([$financialAccount]))->exists();
         if ($used && ((int) $data['account_id'] !== $financialAccount->account_id || (int) $data['branch_id'] !== $financialAccount->branch_id || $data['type'] !== $financialAccount->type)) {
             throw ValidationException::withMessages(['account_id' => 'The ledger, branch and type of a cash or bank account cannot be changed after transactions exist. Deactivate it and create a new account instead.']);
         }
@@ -82,6 +87,45 @@ class FinancialAccountController extends Controller
         $audit->log('financial_accounts.status_changed', $financialAccount, ['is_active' => $financialAccount->is_active]);
 
         return back()->with('status', 'Account status updated.');
+    }
+
+    /**
+     * Posted balance of each cash/bank account: its ledger's lines in its own branch.
+     *
+     * @param  Collection<int, FinancialAccount>  $accounts
+     * @return array<int, string> Keyed by financial account id.
+     */
+    private function balances(Collection $accounts): array
+    {
+        if ($accounts->isEmpty()) {
+            return [];
+        }
+        $sums = $this->postedLines($accounts)->where('journal_entries.status', 'posted')
+            ->groupBy('journal_lines.account_id', 'journal_entries.branch_id')
+            ->selectRaw('journal_lines.account_id as account_id, journal_entries.branch_id as branch_id, SUM(journal_lines.debit) as debit, SUM(journal_lines.credit) as credit')
+            ->get()->keyBy(fn ($sum): string => $sum->account_id.':'.$sum->branch_id);
+
+        return $accounts->mapWithKeys(function (FinancialAccount $account) use ($sums): array {
+            $sum = $sums->get($account->account_id.':'.$account->branch_id);
+            $balance = AccountingDecimal::of((string) ($sum->debit ?? '0'))->minus(AccountingDecimal::of((string) ($sum->credit ?? '0')));
+
+            return [$account->id => AccountingDecimal::string($balance)];
+        })->all();
+    }
+
+    /**
+     * Journal lines on the accounts' ledgers within each account's own branch.
+     *
+     * @param  Collection<int, FinancialAccount>  $accounts
+     */
+    private function postedLines(Collection $accounts): Builder
+    {
+        return DB::table('journal_lines')->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->where(function ($query) use ($accounts): void {
+                foreach ($accounts as $account) {
+                    $query->orWhere(fn ($pair) => $pair->where('journal_lines.account_id', $account->account_id)->where('journal_entries.branch_id', $account->branch_id));
+                }
+            });
     }
 
     private function formData(Request $request, BranchAccess $access): array

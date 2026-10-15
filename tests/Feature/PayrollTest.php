@@ -5,6 +5,7 @@ use App\Enums\AccountMappingKey;
 use App\Enums\EmploymentStatus;
 use App\Enums\FiscalYearStatus;
 use App\Enums\OperationalTransactionStatus;
+use App\Enums\PayrollComponentType;
 use App\Enums\PayrollRunStatus;
 use App\Enums\SystemRole;
 use App\Models\Account;
@@ -667,4 +668,62 @@ test('draft lines can be added and removed and a validated run can return to dra
     $this->post(route('payroll-runs.revert', $run))->assertRedirect();
     expect($run->fresh()->status)->toBe(PayrollRunStatus::Draft)
         ->and($service->addLine($run->fresh(), $first->id, $this->maker)->gross_amount)->toBe('50000.0000');
+});
+
+// --- Cash and bank protection and draft editors ---------------------------------------------
+
+test('a deduction component cannot point to a cash, bank or petty cash ledger but liabilities and advances are allowed', function () {
+    $service = app(PayrollComponentService::class);
+    $pettyCash = Account::factory()->create();
+    AccountMapping::query()->create(['mapping_key' => AccountMappingKey::PettyCash->value, 'account_id' => $pettyCash->id, 'updated_by' => $this->administrator->id]);
+    $advances = Account::factory()->create(['name' => 'Staff advances receivable']);
+
+    foreach ([$this->bank->account_id, $pettyCash->id] as $controlled) {
+        expect(fn () => $service->create(['code' => 'CASHDED'.$controlled, 'name' => 'Cash deduction', 'type' => 'deduction', 'category' => 'statutory', 'account_id' => $controlled, 'is_active' => true], $this->administrator))
+            ->toThrow(ValidationException::class, 'cannot use a cash, bank or petty cash ledger')
+            ->and(fn () => $service->update($this->tax, ['name' => 'Income Tax', 'type' => 'deduction', 'category' => 'tax', 'account_id' => $controlled, 'is_active' => true], $this->administrator))
+            ->toThrow(ValidationException::class, 'cannot use a cash, bank or petty cash ledger');
+    }
+    $this->actingAs($this->administrator)->put(route('payroll-components.update', $this->tax), ['name' => 'Income Tax', 'type' => 'deduction', 'category' => 'tax', 'account_id' => $this->bank->account_id, 'is_active' => '1'])->assertSessionHasErrors('account_id');
+
+    expect($service->update($this->tax, ['name' => 'Income Tax', 'type' => 'deduction', 'category' => 'tax', 'account_id' => $this->taxPayable->id, 'is_active' => true], $this->administrator)->account_id)->toBe($this->taxPayable->id)
+        ->and($service->create(['code' => 'ADV2', 'name' => 'Advance recovery', 'type' => 'deduction', 'category' => 'statutory', 'account_id' => $advances->id, 'is_active' => true], $this->administrator)->account_id)->toBe($advances->id)
+        ->and($service->eligibleAccounts(PayrollComponentType::Deduction)->pluck('id')->all())->toContain($advances->id, $this->taxPayable->id)
+        ->not->toContain($this->bank->account_id, $pettyCash->id);
+});
+
+test('posting refuses a deduction that was pointed at a bank ledger outside the component form', function () {
+    payrollEmployee($this, ['BASIC' => '50000.0000', 'TAX' => '500.0000']);
+    payrollConfigure($this);
+    $run = payrollApproved($this);
+    // A ledger that became a bank account after the component was saved.
+    $this->tax->update(['account_id' => $this->bank->account_id]);
+
+    expect(fn () => app(PayrollRunService::class)->post($run, $this->maker))->toThrow(ValidationException::class, 'cash, bank or petty cash ledger')
+        ->and(JournalEntry::query()->count())->toBe(0)
+        ->and($run->fresh()->status)->toBe(PayrollRunStatus::Approved);
+
+    $this->tax->update(['account_id' => $this->taxPayable->id]);
+    expect(app(PayrollRunService::class)->post($run->fresh(), $this->maker)->status)->toBe(PayrollRunStatus::Posted);
+});
+
+test('a user who edited payroll lines cannot approve the run another user submitted', function () {
+    payrollEmployee($this);
+    $second = payrollEmployee($this);
+    $service = app(PayrollRunService::class);
+    $run = $service->createFromStructures(['branch_id' => $this->branch->id, 'accounting_period_id' => $this->period->id], $this->maker);
+    $run->lines()->where('employee_id', $second->id)->first()->items()->get()->each->delete();
+    $run->lines()->where('employee_id', $second->id)->delete();
+    $editor = payrollUser(SystemRole::Approver, $this->branch);
+    $editor->givePermissionTo('payroll.manage');
+
+    $service->updateLine($run->lines()->first(), [$this->basic->id => '51000.0000'], $editor);
+    $service->addLine($run->fresh(), $second->id, $editor);
+    $service->removeLine($run->lines()->where('employee_id', $second->id)->first(), $editor);
+    expect(AuditLog::query()->where('auditable_type', $run->getMorphClass())->where('auditable_id', $run->id)->whereIn('event', ['payroll.line_updated', 'payroll.line_added', 'payroll.line_removed'])->pluck('actor_id')->unique()->values()->all())->toBe([$editor->id]);
+
+    $service->submit($service->validate($run->fresh(), $this->maker), $this->maker);
+    expect($service->canApprove($run->fresh(), $editor))->toBeFalse()
+        ->and(fn () => $service->approve($run->fresh(), $editor))->toThrow(ValidationException::class, 'You edited this payroll run')
+        ->and($service->approve($run->fresh(), $this->approver)->status)->toBe(PayrollRunStatus::Approved);
 });

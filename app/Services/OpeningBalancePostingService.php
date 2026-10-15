@@ -13,7 +13,7 @@ use Illuminate\Validation\ValidationException;
 
 class OpeningBalancePostingService
 {
-    public function __construct(private BranchAccess $branchAccess, private JournalPostingService $posting, private AuditLogger $audit) {}
+    public function __construct(private BranchAccess $branchAccess, private JournalPostingService $posting, private AuditLogger $audit, private OpeningBalanceImportService $imports) {}
 
     public function approve(OpeningBalanceBatch $batch, User $actor): OpeningBalanceBatch
     {
@@ -22,7 +22,7 @@ class OpeningBalancePostingService
         return DB::transaction(function () use ($batch, $actor): OpeningBalanceBatch {
             $batch = OpeningBalanceBatch::query()->with('lines')->lockForUpdate()->findOrFail($batch->id);
             abort_unless($this->branchAccess->canAccess($actor, $batch->branch), 403);
-            if ($batch->status !== 'draft' || in_array($actor->id, [$batch->created_by, $batch->updated_by], true)) {
+            if ($batch->status !== 'draft' || in_array($actor->id, [$batch->created_by, $batch->updated_by, $this->imports->uploaderOf($batch)], true)) {
                 throw ValidationException::withMessages(['status' => 'A separate authorized user must approve a draft opening balance.']);
             }
             if (! BigDecimal::of($batch->total_debit)->isEqualTo(BigDecimal::of($batch->total_credit)) || BigDecimal::of($batch->total_debit)->isZero()) {

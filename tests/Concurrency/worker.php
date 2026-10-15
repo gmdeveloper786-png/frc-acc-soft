@@ -6,11 +6,15 @@
  * service call inside the disposable database, and prints a JSON result.
  */
 
+use App\Models\DepreciationRun;
 use App\Models\JournalEntry;
+use App\Models\PayrollRun;
 use App\Models\User;
+use App\Services\Assets\DepreciationRunService;
 use App\Services\Inventory\InventoryService;
 use App\Services\JournalPostingService;
 use App\Services\OperationalTransactionService;
+use App\Services\Payroll\PayrollRunService;
 use App\Services\PurchaseBillService;
 use App\Services\PurchaseOrderService;
 
@@ -35,6 +39,9 @@ try {
         'journal_post' => app(JournalPostingService::class)->post(JournalEntry::query()->findOrFail($arguments['journal_id']), $actor)->voucher_number,
         'purchase_bill' => app(PurchaseBillService::class)->create($arguments['payload'], $actor)->id,
         'vendor_payment' => app(OperationalTransactionService::class)->create($arguments['payload'], $actor)->id,
+        'payroll_pay' => app(PayrollRunService::class)->pay(PayrollRun::query()->findOrFail($arguments['run_id']), $arguments['payload'], $actor)->id,
+        'depreciation_post' => JournalEntry::query()->findOrFail(app(DepreciationRunService::class)->post(DepreciationRun::query()->findOrFail($arguments['run_id']), $actor)->journal_entry_id)->voucher_number,
+        'depreciation_prepare' => app(DepreciationRunService::class)->prepare((int) $arguments['branch_id'], (int) $arguments['period_id'], $actor)->id,
         default => throw new InvalidArgumentException('Unknown scenario.'),
     };
     echo json_encode(['ok' => true, 'result' => $result]);

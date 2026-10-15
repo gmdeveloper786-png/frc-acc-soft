@@ -11,6 +11,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class RoleController extends Controller
@@ -37,6 +38,7 @@ class RoleController extends Controller
     public function store(Request $request, AuditLogger $audit): RedirectResponse
     {
         $data = $this->validated($request);
+        $this->ensureGrantable($request, null, $data['permissions']);
         $role = DB::transaction(function () use ($data, $audit): Role {
             $role = Role::query()->create(['name' => $data['name'], 'guard_name' => 'web', 'max_branches' => $data['max_branches']]);
             $role->syncPermissions($data['permissions']);
@@ -78,6 +80,7 @@ class RoleController extends Controller
         abort_if($role->is_protected, 403, 'Protected system roles cannot be edited.');
         $this->guardAuthorityRole($request, $role, $authority);
         $data = $this->validated($request, $role);
+        $this->ensureGrantable($request, $role, $data['permissions']);
         DB::transaction(function () use ($role, $data, $audit): void {
             $role->update(['name' => $data['name'], 'max_branches' => $data['max_branches']]);
             $role->syncPermissions($data['permissions']);
@@ -99,6 +102,21 @@ class RoleController extends Controller
     private function guardAuthorityRole(Request $request, Role $role, ApprovalAuthorityService $authority): void
     {
         abort_if($role->approval_authority !== null && ! $authority->mayManageDirectorRole($request->user()), 403, 'A role that carries Director approval authority can only be changed by a Director.');
+    }
+
+    /**
+     * A user may only add permissions they hold themselves. Permissions the
+     * role already carries may stay or be removed.
+     *
+     * @param  list<string>  $permissions
+     */
+    private function ensureGrantable(Request $request, ?Role $role, array $permissions): void
+    {
+        $added = collect($permissions)->diff($role ? $role->permissions()->pluck('name') : []);
+        $missing = $added->diff($request->user()->getAllPermissions()->pluck('name'))->values()->all();
+        if ($missing !== []) {
+            throw ValidationException::withMessages(['permissions' => 'You can only grant permissions you hold yourself. Not held: '.implode(', ', $missing).'.']);
+        }
     }
 
     private function validated(Request $request, ?Role $role = null): array

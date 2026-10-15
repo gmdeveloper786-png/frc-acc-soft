@@ -22,9 +22,9 @@ class UserController extends Controller
     /**
      * Display a listing of the resource.
      */
-    public function index(Request $request): View
+    public function index(Request $request, BranchAccess $access): View
     {
-        $users = User::query()->with(['roles', 'branches'])
+        $users = $access->userScope($request->user())->with(['roles', 'branches'])
             ->when($request->string('search')->trim()->isNotEmpty(), function ($query) use ($request): void {
                 $search = '%'.$request->string('search')->trim().'%';
                 $query->where(fn ($inner) => $inner->where('name', 'like', $search)->orWhere('email', 'like', $search));
@@ -49,10 +49,11 @@ class UserController extends Controller
     /**
      * Store a newly created resource in storage.
      */
-    public function store(Request $request, BranchAccess $access, AuditLogger $audit, ApprovalAuthorityService $authority): RedirectResponse
+    public function store(Request $request, BranchAccess $access, AdministratorGuard $guard, AuditLogger $audit, ApprovalAuthorityService $authority): RedirectResponse
     {
         $data = $this->validated($request);
         $this->ensureAssignable($request, $data['roles'], $data['branches'], $access);
+        $guard->ensureMayAssignRoles($request->user(), null, $data['roles']);
         $authorityChange = $authority->guardUserChange(null, $data['roles'], false, $data['authority_reason'] ?? null, $request->user());
 
         $user = DB::transaction(function () use ($data, $audit, $authority, $authorityChange): User {
@@ -74,8 +75,9 @@ class UserController extends Controller
     /**
      * Display the specified resource.
      */
-    public function show(User $user): View
+    public function show(Request $request, User $user, BranchAccess $access): View
     {
+        abort_unless($access->canManageUser($request->user(), $user), 403);
         $user->load(['roles.permissions', 'branches']);
 
         return view('administration.users.show', compact('user'));
@@ -84,8 +86,10 @@ class UserController extends Controller
     /**
      * Show the form for editing the specified resource.
      */
-    public function edit(Request $request, User $user, BranchAccess $access): View
+    public function edit(Request $request, User $user, BranchAccess $access, AdministratorGuard $guard): View
     {
+        abort_unless($access->canManageUser($request->user(), $user), 403);
+        abort_unless($guard->mayManage($request->user(), $user), 403);
         $user->load(['roles', 'branches']);
 
         return view('administration.users.edit', [
@@ -99,12 +103,22 @@ class UserController extends Controller
      */
     public function update(Request $request, User $user, BranchAccess $access, AdministratorGuard $guard, AuditLogger $audit, ApprovalAuthorityService $authority): RedirectResponse
     {
+        abort_unless($access->canManageUser($request->user(), $user), 403);
         $data = $this->validated($request, $user);
         if ($request->user()->is($user) && ($data['roles'] !== $user->roles->pluck('name')->all() || $data['branches'] !== $user->branches->pluck('id')->map(fn ($id) => (string) $id)->all() || ! $data['is_active'])) {
             return back()->withErrors(['roles' => 'You cannot change your own roles, branches, or active status.'])->withInput();
         }
         $this->ensureAssignable($request, $data['roles'], $data['branches'], $access);
+        // Branches outside the actor's scope are not on the form; keep them rather than silently removing them.
+        $outOfScope = $user->branches->pluck('id')->diff($access->scope($request->user())->pluck('id'))->map(fn ($id): int => (int) $id);
+        $data['branches'] = collect($data['branches'])->map(fn ($id): int => (int) $id)->merge($outOfScope)->unique()->values()->all();
+        $this->ensureBranchLimit($data['roles'], $data['branches']);
         $guard->ensureMayChange($user, $data['is_active'], $data['roles']);
+        $guard->ensureMayManage($request->user(), $user);
+        $guard->ensureMayAssignRoles($request->user(), $user, $data['roles']);
+        if ($data['email'] !== $user->email || filled($data['password'] ?? null)) {
+            $guard->ensureMayChangeCredentials($request->user(), $user);
+        }
         $authorityChange = $authority->guardUserChange($user, $data['roles'], $data['email'] !== $user->email || filled($data['password'] ?? null), $data['authority_reason'] ?? null, $request->user());
 
         DB::transaction(function () use ($user, $data, $audit, $authority, $authorityChange): void {
@@ -144,6 +158,15 @@ class UserController extends Controller
     {
         abort_unless($request->user()->can('users.assign_roles') && $request->user()->can('branches.assign_users'), 403);
         abort_unless($access->actorCanAssign($request->user(), $branches), 403);
+        $this->ensureBranchLimit($roles, $branches);
+    }
+
+    /**
+     * @param  list<string>  $roles
+     * @param  list<int|string>  $branches
+     */
+    private function ensureBranchLimit(array $roles, array $branches): void
+    {
         $limit = Role::query()->whereIn('name', $roles)->whereNotNull('max_branches')->min('max_branches');
         if ($limit !== null && count($branches) > $limit) {
             abort(422, 'Selected role allows a maximum of '.$limit.' branch assignment(s).');

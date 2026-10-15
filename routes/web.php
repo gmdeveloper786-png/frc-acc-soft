@@ -19,6 +19,7 @@ use App\Http\Controllers\AccountingSetup\AccountMappingController;
 use App\Http\Controllers\AccountingSetup\FiscalYearController;
 use App\Http\Controllers\AccountingSetup\OpeningBalanceController;
 use App\Http\Controllers\AccountingSetup\OpeningBalanceImportController;
+use App\Http\Controllers\AccountingSetup\YearEndClosingController;
 use App\Http\Controllers\Administration\RoleController;
 use App\Http\Controllers\Administration\UserController;
 use App\Http\Controllers\ApprovalSettingsController;
@@ -88,6 +89,8 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::put('/fiscal-years/{fiscalYear}', [FiscalYearController::class, 'update'])->middleware('permission:fiscal_years.manage')->name('fiscal-years.update');
     Route::post('/fiscal-years/{fiscalYear}/open', [FiscalYearController::class, 'open'])->middleware('permission:fiscal_years.manage')->name('fiscal-years.open');
     Route::post('/fiscal-years/{fiscalYear}/close', [FiscalYearController::class, 'close'])->middleware('permission:fiscal_years.close')->name('fiscal-years.close');
+    Route::get('/fiscal-years/{fiscalYear}/closing', [YearEndClosingController::class, 'show'])->middleware('permission:fiscal_years.close')->name('fiscal-years.closing');
+    Route::post('/fiscal-years/{fiscalYear}/closing', [YearEndClosingController::class, 'store'])->middleware(['permission:fiscal_years.close', 'permission:journals.post', 'permission:branches.view_all'])->name('fiscal-years.closing.store');
     Route::post('/fiscal-years/{fiscalYear}/reopen', [FiscalYearController::class, 'reopen'])->middleware('permission:fiscal_years.reopen')->name('fiscal-years.reopen');
     Route::post('/fiscal-years/{fiscalYear}/current', [FiscalYearController::class, 'current'])->middleware('permission:fiscal_years.manage')->name('fiscal-years.current');
 
@@ -120,7 +123,7 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::get('/opening-balances/import', [OpeningBalanceImportController::class, 'create'])->middleware('permission:opening_balances.import')->name('opening-balance-imports.create');
     Route::post('/opening-balances/import', [OpeningBalanceImportController::class, 'store'])->middleware('permission:opening_balances.import')->name('opening-balance-imports.store');
     Route::get('/opening-balances/import/{openingBalanceImport}', [OpeningBalanceImportController::class, 'show'])->middleware('permission:opening_balances.import')->name('opening-balance-imports.show');
-    Route::post('/opening-balances/import/{openingBalanceImport}/apply', [OpeningBalanceImportController::class, 'apply'])->middleware('permission:opening_balances.import')->name('opening-balance-imports.apply');
+    Route::post('/opening-balances/import/{openingBalanceImport}/apply', [OpeningBalanceImportController::class, 'apply'])->middleware(['permission:opening_balances.import', 'permission:opening_balances.prepare'])->name('opening-balance-imports.apply');
     Route::get('/opening-balances', [OpeningBalanceController::class, 'index'])->middleware('permission:opening_balances.view')->name('opening-balances.index');
     Route::get('/opening-balances/create', [OpeningBalanceController::class, 'create'])->middleware('permission:opening_balances.prepare')->name('opening-balances.create');
     Route::post('/opening-balances', [OpeningBalanceController::class, 'store'])->middleware('permission:opening_balances.prepare')->name('opening-balances.store');
@@ -138,6 +141,7 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::get('/journals/{journal}', [JournalController::class, 'show'])->middleware('permission:journals.view')->name('journals.show');
     Route::get('/journals/{journal}/edit', [JournalController::class, 'edit'])->middleware('permission:journals.update')->name('journals.edit');
     Route::put('/journals/{journal}', [JournalController::class, 'update'])->middleware('permission:journals.update')->name('journals.update');
+    Route::delete('/journals/{journal}', [JournalController::class, 'destroy'])->middleware('permission:journals.update')->name('journals.destroy');
     Route::post('/journals/{journal}/submit', [JournalController::class, 'submit'])->middleware('permission:journals.submit')->name('journals.submit');
     Route::post('/journals/{journal}/approve', [JournalController::class, 'approve'])->middleware('permission:journals.approve')->name('journals.approve');
     Route::post('/journals/{journal}/reject', [JournalController::class, 'reject'])->middleware('permission:journals.reject')->name('journals.reject');

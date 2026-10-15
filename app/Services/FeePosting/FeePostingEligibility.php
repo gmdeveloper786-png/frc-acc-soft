@@ -244,7 +244,7 @@ class FeePostingEligibility
             return null;
         }
         try {
-            return $this->accountMappings->feeIncomeFor($serviceId);
+            return $this->accountMappings->serviceFeeIncome($serviceId);
         } catch (ValidationException $exception) {
             $reasons['fee_income_mapping'] = collect($exception->errors())->flatten()->first();
 
