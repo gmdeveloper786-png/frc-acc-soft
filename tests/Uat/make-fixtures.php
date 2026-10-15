@@ -11,6 +11,9 @@
  *    School-entity row and one inter-unit row.
  *  - payroll-import.xlsx: a payroll sheet for two synthetic Branch B
  *    employees plus one unknown employee code (to be excluded in review).
+ *  - uat-bank-statement-sample.csv: a short October 2026 statement for
+ *    UAT Bank A (opening balance line, a deposit, a cheque, bank charges)
+ *    for practising statement import and reconciliation matching.
  *
  * Only PhpSpreadsheet is used; the application and its database are not booted.
  */
@@ -53,5 +56,18 @@ $payroll = [
     ['UAT-EMP-B99', 'UAT Unknown Person', 10000, 0, 0, 10000],
 ];
 $write($out.'/payroll-import.xlsx', 'Payroll', $payroll);
+
+$statement = [
+    ['Date', 'Description', 'Reference', 'Withdrawal', 'Deposit', 'Balance'],
+    ['2026-10-01', 'UAT opening balance', '', '', '', '0.00'],
+    ['2026-10-05', 'UAT synthetic client deposit', 'UAT-DEP-001', '', '7000.00', '7000.00'],
+    ['2026-10-12', 'UAT cheque payment', 'UAT-CHQ-0001', '2000.00', '', '5000.00'],
+    ['2026-10-31', 'UAT bank charges', 'UAT-CHG-001', '150.00', '', '4850.00'],
+];
+$handle = fopen($out.'/uat-bank-statement-sample.csv', 'wb');
+foreach ($statement as $row) {
+    fputcsv($handle, $row, ',', '"', '');
+}
+fclose($handle);
 
 echo "Fixtures written to {$out}".PHP_EOL;

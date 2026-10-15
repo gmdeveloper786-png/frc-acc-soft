@@ -3,13 +3,18 @@
 /*
  * Builds the isolated UAT database with SYNTHETIC data only.
  *
- *   php tests/Uat/setup.php [--fresh]
+ *   php tests/Uat/setup.php [--fresh] [--no-sample]
  *
  * Creates "<dev database>_uat", migrates and seeds it, then adds UAT users for
  * every role, a small synthetic chart of accounts, branches, services, GL
  * mappings, cash/bank accounts, an open fiscal year and periods, vendors,
  * stock items and anonymised employees. A synthetic UAT Director is appointed
  * inside the UAT database only. No real financial data is used.
+ *
+ * Unless --no-sample is given, tests/Uat/sample-data.php then adds synthetic
+ * master data and drafts for every module (funds, imprest, payroll, inventory,
+ * fixed assets, budget, draft transactions). Posting policies stay unapproved
+ * and nothing is posted. This script writes nothing outside storage/uat/.
  */
 
 use App\Enums\AccountMappingKey;
@@ -33,7 +38,7 @@ use Illuminate\Support\Facades\Hash;
 
 require __DIR__.'/bootstrap.php';
 $root = dirname(__DIR__, 2);
-$options = getopt('', ['fresh']);
+$options = getopt('', ['fresh', 'no-sample']);
 
 $env = uatEnv($root);
 $database = uatDatabase($root);
@@ -147,6 +152,21 @@ DB::transaction(function (): void {
     Vendor::query()->create(['vendor_code' => 'UAT-V-002', 'name' => 'UAT Stationers', 'is_active' => true, 'created_by' => $users['admin']->id]);
 });
 
+$summary = isset($options['no-sample']) ? ['sample data' => 'skipped (--no-sample)'] : require __DIR__.'/sample-data.php';
+
 @unlink(base_path('storage/uat/fake-frc-extra.json')); // the synthetic FRC API starts from its base data set
 
+echo 'UAT seed summary:'.PHP_EOL;
+foreach ($summary as $module => $detail) {
+    echo "  - {$module}: {$detail}".PHP_EOL;
+}
+foreach ([
+    'users' => User::query()->count(), 'accounts' => Account::query()->count(), 'funds' => DB::table('funds')->count(),
+    'employees' => DB::table('employees')->count(), 'inventory items' => DB::table('inventory_items')->count(),
+    'fixed assets' => DB::table('fixed_assets')->count(), 'budgets' => DB::table('budgets')->count(),
+    'draft transactions' => DB::table('operational_transactions')->where('status', 'draft')->count(),
+    'posted journals' => DB::table('journal_entries')->where('status', 'posted')->count(),
+] as $label => $count) {
+    echo "  {$label}: {$count}".PHP_EOL;
+}
 echo "UAT database {$database} is ready. Users: uat.<role>@uat.test (synthetic password in tests/Uat/README).".PHP_EOL;

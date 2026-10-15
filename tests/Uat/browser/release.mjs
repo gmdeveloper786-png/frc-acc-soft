@@ -28,7 +28,7 @@ mkdirSync(join(OUT, 'screens'), { recursive: true });
 const results = { base: BASE, startedAt: new Date().toISOString(), reset: null, fixtures: null, cases: [], defects: [], automationNotes: [], consoleErrors: [], pagesVisited: 0 };
 
 if (RESET) {
-    const output = execFileSync(PHP, ['tests/Uat/setup.php', '--fresh'], { cwd: ROOT, encoding: 'utf8' });
+    const output = execFileSync(PHP, ['tests/Uat/setup.php', '--fresh', '--no-sample'], { cwd: ROOT, encoding: 'utf8' });
     results.reset = output.trim().split('\n').slice(-1)[0];
     console.log('UAT database rebuilt:', results.reset);
 }

@@ -25,7 +25,7 @@ const save = () => writeFileSync(join(OUT, 'workflows-results.json'), JSON.strin
 
 if (RESET) {
     const started = Date.now();
-    const output = execFileSync(PHP, ['tests/Uat/setup.php', '--fresh'], { cwd: join(import.meta.dirname, '..', '..', '..'), encoding: 'utf8' });
+    const output = execFileSync(PHP, ['tests/Uat/setup.php', '--fresh', '--no-sample'], { cwd: join(import.meta.dirname, '..', '..', '..'), encoding: 'utf8' });
     results.reset = { command: `${PHP} tests/Uat/setup.php --fresh`, seconds: Math.round((Date.now() - started) / 1000), output: output.trim().split('\n').slice(-2) };
     console.log('UAT database rebuilt:', results.reset.output.join(' | '));
 }
