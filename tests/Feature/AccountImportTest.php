@@ -223,3 +223,12 @@ test('heading 215 cannot be skipped or excluded while its approved ledgers depen
         ->and(Account::query()->where('code', '21502')->first()->parent->code)->toBe('215')
         ->and(Account::query()->where('code', '21501')->exists())->toBeFalse();
 });
+
+test('paginated review screen uses bootstrap pagination without unsized tailwind svg arrows', function () {
+    $import = app(AccountImportService::class)->preview(clientCoaUpload(), $this->admin);
+
+    $html = $this->get(route('account-imports.show', $import))->assertOk()->getContent();
+    expect($html)->toContain('class="pagination')->toContain('page-link')->not->toContain('<svg')
+        ->and(Account::query()->count())->toBe(0);
+    $this->get(route('account-imports.show', [$import, 'page' => 5]))->assertOk()->assertSee('page-link', false);
+});

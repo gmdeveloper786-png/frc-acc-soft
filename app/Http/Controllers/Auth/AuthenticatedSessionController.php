@@ -38,7 +38,10 @@ class AuthenticatedSessionController extends Controller
         $request->session()->regenerate();
         $audit->log('auth.login', $request->user());
 
-        return redirect()->intended(route('dashboard'));
+        // Always land on the dashboard: a URL remembered before login may be one this role cannot open.
+        $request->session()->forget('url.intended');
+
+        return redirect()->route('dashboard');
     }
 
     public function destroy(Request $request, AuditLogger $audit): RedirectResponse

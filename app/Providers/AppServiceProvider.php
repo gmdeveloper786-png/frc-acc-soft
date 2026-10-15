@@ -6,6 +6,7 @@ use App\Models\AppSetting;
 use App\Support\AppSettings;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\Paginator;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\View;
@@ -27,6 +28,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        // The UI is Bootstrap 5; Laravel's default Tailwind pagination renders unsized SVG arrows that fill the page width.
+        Paginator::useBootstrapFive();
+
         AppSetting::saved(fn (AppSetting $setting) => cache()->forget(AppSettings::cacheKey($setting->key)));
         AppSetting::deleted(fn (AppSetting $setting) => cache()->forget(AppSettings::cacheKey($setting->key)));
 
