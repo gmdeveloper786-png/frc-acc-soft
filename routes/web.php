@@ -195,7 +195,7 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::get('/reports/vendor-ledger', [OperationalReportController::class, 'vendorLedger'])->middleware('permission:finance_reports.view')->name('reports.vendor-ledger');
     Route::get('/reports/payables', [OperationalReportController::class, 'payables'])->middleware('permission:finance_reports.view')->name('reports.payables');
 
-    foreach (['assets', 'inventory', 'budgets', 'payroll', 'statements', 'cashflow', 'ledger-exports', 'operational-reports', 'payroll-reports', 'frc-integration', 'fee-posting'] as $module) {
+    foreach (['assets', 'inventory', 'budgets', 'payroll', 'statements', 'cashflow', 'ledger-exports', 'operational-reports', 'payroll-reports', 'frc-integration', 'fee-posting', 'bank-reconciliation', 'imprest', 'funds'] as $module) {
         require __DIR__.'/modules/'.$module.'.php';
     }
 

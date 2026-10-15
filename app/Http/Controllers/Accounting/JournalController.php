@@ -10,6 +10,7 @@ use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\FiscalYear;
 use App\Models\FrcService;
+use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\VoucherType;
 use App\Services\BranchAccess;
@@ -52,7 +53,7 @@ class JournalController extends Controller
     public function show(Request $request, JournalEntry $journal, BranchAccess $access): View
     {
         abort_unless($access->canAccess($request->user(), $journal->branch), 403);
-        $journal->load(['lines.account', 'lines.service', 'voucherType', 'fiscalYear', 'accountingPeriod', 'branch', 'creator', 'submitter', 'approver', 'poster', 'reversal', 'reversalOf']);
+        $journal->load(['lines.account', 'lines.service', 'lines.fund', 'voucherType', 'fiscalYear', 'accountingPeriod', 'branch', 'creator', 'submitter', 'approver', 'poster', 'reversal', 'reversalOf']);
         $openPeriods = AccountingPeriod::query()->with('fiscalYear')->where('status', 'open')->orderBy('start_date')->get();
 
         return view('accounting.journals.show', compact('journal', 'openPeriods'));
@@ -128,6 +129,7 @@ class JournalController extends Controller
             'branches' => $access->scope($request->user())->orderBy('name')->get(),
             'accounts' => Account::query()->where('is_active', true)->where('is_postable', true)->where('level', 'ledger')->orderBy('code')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
+            'funds' => Fund::query()->active()->orderBy('code')->get(),
         ];
     }
 }

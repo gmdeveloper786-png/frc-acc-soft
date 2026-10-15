@@ -31,6 +31,7 @@ class StoreOperationalTransactionRequest extends FormRequest
             'payable_account_id' => ['nullable', 'integer', 'exists:accounts,id'],
             'vendor_id' => ['nullable', 'integer', 'exists:vendors,id'],
             'service_id' => ['nullable', 'integer', 'exists:frc_services,id'],
+            'fund_id' => ['nullable', 'integer', Rule::exists('funds', 'id')->where('is_active', true)],
             'donation_category_id' => [$type === OperationalTransactionType::Donation ? 'required' : 'nullable', 'integer', 'exists:donation_categories,id'],
             'purchase_bill_id' => [$type === OperationalTransactionType::VendorPayment ? 'required' : 'nullable', 'integer', 'exists:purchase_bills,id'],
             'reference_number' => ['nullable', 'string', 'max:255'],

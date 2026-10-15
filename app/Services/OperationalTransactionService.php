@@ -11,7 +11,9 @@ use App\Enums\PurchaseBillStatus;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\Branch;
+use App\Models\DonationCategory;
 use App\Models\FinancialAccount;
+use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
 use App\Models\PayrollRun;
@@ -19,6 +21,7 @@ use App\Models\PayrollRunPayment;
 use App\Models\PurchaseBill;
 use App\Models\User;
 use App\Models\VoucherType;
+use App\Services\Funds\FundRestrictionPolicy;
 use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
@@ -36,6 +39,7 @@ class OperationalTransactionService
         private ApprovalAuthorityService $authority,
         private SplitPaymentDetector $splits,
         private ManualJournalGuard $guard,
+        private FundRestrictionPolicy $fundRules,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -53,6 +57,7 @@ class OperationalTransactionService
             }
             $data = $this->applyMappingDefaults($type, $data);
             $this->validateMappings($type, $data, $branch);
+            $data = $this->applyFund($type, $data, $amount);
             if ($type === OperationalTransactionType::VendorPayment) {
                 $this->guardVendorPayment($data, $amount);
             } else {
@@ -296,7 +301,7 @@ class OperationalTransactionService
             'approved_at' => $transaction->approved_at ?: now(),
         ]);
         foreach ([[$debitAccount, $transaction->amount, '0.0000'], [$creditAccount, '0.0000', $transaction->amount]] as $index => [$accountId, $debit, $credit]) {
-            $journal->lines()->create(['line_number' => $index + 1, 'account_id' => $accountId, 'service_id' => $transaction->service_id, 'description' => $transaction->narration, 'debit' => $debit, 'credit' => $credit]);
+            $journal->lines()->create(['line_number' => $index + 1, 'account_id' => $accountId, 'service_id' => $transaction->service_id, 'fund_id' => $transaction->fund_id, 'description' => $transaction->narration, 'debit' => $debit, 'credit' => $credit]);
         }
 
         return $journal;
@@ -323,6 +328,41 @@ class OperationalTransactionService
         }
 
         return $data;
+    }
+
+    /**
+     * A donation without a chosen fund takes the default fund of its
+     * category. The restricted-fund rule is checked on the ledger the
+     * transaction charges; it refuses only when enforcement is on.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function applyFund(OperationalTransactionType $type, array $data, BigDecimal $amount): array
+    {
+        if ($type === OperationalTransactionType::Donation && blank($data['fund_id'] ?? null) && filled($data['donation_category_id'] ?? null)) {
+            $data['fund_id'] = DonationCategory::query()->whereKey($data['donation_category_id'])->value('fund_id');
+        }
+        if (blank($data['fund_id'] ?? null)) {
+            unset($data['fund_id']);
+
+            return $data;
+        }
+        if (! Fund::query()->whereKey($data['fund_id'])->where('is_active', true)->exists()) {
+            throw ValidationException::withMessages(['fund_id' => 'The selected fund is not active.']);
+        }
+        $this->enforceFundRule($type, $data, $amount);
+
+        return $data;
+    }
+
+    /** @param array<string, mixed> $data */
+    private function enforceFundRule(OperationalTransactionType $type, array $data, BigDecimal $amount): void
+    {
+        $line = $this->fundRules->transactionChargeLine($type, $data['fund_id'] ?? null, $data['contra_account_id'] ?? null, AccountingDecimal::string($amount));
+        if ($line !== null) {
+            $this->fundRules->check([$line], fn (): string => 'contra_account_id');
+        }
     }
 
     /** @param array<string, mixed> $data */

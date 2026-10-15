@@ -18,6 +18,9 @@ use App\Services\AccountingDecimal;
 use App\Services\BranchAccess;
 use App\Services\Payroll\EmployeeService;
 use App\Services\Payroll\PayrollRunService;
+use App\Services\Payroll\PayslipService;
+use App\Services\Payroll\StaffAdvanceRecoveryService;
+use App\Services\Payroll\StaffAdvanceService;
 use Brick\Math\BigDecimal;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
@@ -62,7 +65,7 @@ class PayrollRunController extends Controller
         return redirect()->route('payroll-runs.show', $run)->with('status', 'Draft payroll run created from the salary structures. Review the lines, then validate.');
     }
 
-    public function show(Request $request, PayrollRun $payrollRun, BranchAccess $access, EmployeeService $employees, PayrollRunService $service): View
+    public function show(Request $request, PayrollRun $payrollRun, BranchAccess $access, EmployeeService $employees, PayrollRunService $service, StaffAdvanceRecoveryService $advanceRecovery, PayslipService $payslips): View
     {
         $this->guardBranch($request, $payrollRun, $access);
         $run = $service->syncPaidStatus($payrollRun);
@@ -74,6 +77,9 @@ class PayrollRunController extends Controller
             'canApprove' => $service->canApprove($run, $user),
             'isMaker' => in_array($user->id, [$run->created_by, $run->validated_by, $run->submitted_by], true),
             'financialAccounts' => $user->can('payroll.pay') ? FinancialAccount::query()->where('branch_id', $run->branch_id)->where('is_active', true)->whereIn('type', ['bank', 'cash'])->orderBy('name')->get() : collect(),
+            // Staff advance instalments due by this period, for the preparer to put on the draft lines.
+            'dueRecoveries' => $sensitive && in_array($run->status, [PayrollRunStatus::Draft, PayrollRunStatus::Rejected, PayrollRunStatus::Validated], true) ? $advanceRecovery->dueForRun($run) : collect(),
+            'payslipsAvailable' => $sensitive && $payslips->isIssuable($run),
             'availableEmployees' => $run->status->isEditable() && $user->can('payroll.manage')
                 ? Employee::query()->select(['id', 'employee_code', 'name'])->where('branch_id', $run->branch_id)->where('employment_status', EmploymentStatus::Active->value)->whereNotIn('id', $run->lines->pluck('employee_id'))->orderBy('employee_code')->get()
                 : collect(),
@@ -195,6 +201,14 @@ class PayrollRunController extends Controller
         $transaction = $service->pay($payrollRun, $data, $request->user());
 
         return back()->with('status', "Salary payment #{$transaction->id} created as a draft in the payment workflow. It must be submitted, approved, disbursed and posted there.");
+    }
+
+    /** Put the due staff advance recoveries on the draft lines, as an ordinary line edit by the preparer. */
+    public function applyAdvanceRecoveries(Request $request, PayrollRun $payrollRun, StaffAdvanceService $advances): RedirectResponse
+    {
+        $changed = $advances->applyDueRecoveries($payrollRun, $request->user());
+
+        return back()->with('status', $changed === 0 ? 'No payroll line needed a change: the due recoveries are already on the run.' : "Due advance recoveries entered on {$changed} payroll ".str('line')->plural($changed).'. Validate the run again.');
     }
 
     public function reverse(Request $request, PayrollRun $payrollRun, PayrollRunService $service): RedirectResponse

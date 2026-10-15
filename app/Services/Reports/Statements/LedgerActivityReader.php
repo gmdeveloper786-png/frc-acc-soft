@@ -20,6 +20,9 @@ class LedgerActivityReader
 
     public const BY_SERVICE = 'journal_lines.service_id';
 
+    /** Optional fund on each journal line; lines without a fund come back with a null dimension. */
+    public const BY_FUND = 'journal_lines.fund_id';
+
     /** Source type of year-end closing journals (see YearEndClosingService). */
     public const YEAR_END_CLOSING = 'year_end_closing';
 

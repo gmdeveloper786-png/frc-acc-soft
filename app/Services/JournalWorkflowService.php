@@ -6,13 +6,14 @@ use App\Enums\JournalStatus;
 use App\Models\Branch;
 use App\Models\JournalEntry;
 use App\Models\User;
+use App\Services\Funds\FundRestrictionPolicy;
 use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class JournalWorkflowService
 {
-    public function __construct(private BranchAccess $branchAccess, private JournalValidationService $validator, private AuditLogger $audit, private ManualJournalGuard $manualGuard) {}
+    public function __construct(private BranchAccess $branchAccess, private JournalValidationService $validator, private AuditLogger $audit, private ManualJournalGuard $manualGuard, private FundRestrictionPolicy $fundRules) {}
 
     /** @param array<string,mixed> $data */
     public function create(array $data, User $actor): JournalEntry
@@ -144,6 +145,8 @@ class JournalWorkflowService
     /** @param list<array<string,mixed>> $lines */
     private function replaceLines(JournalEntry $journal, array $lines): void
     {
+        // Restricted-fund rule (always enforced; posting checks it again).
+        $this->fundRules->check(array_values($lines), fn (int|string $index): string => "lines.{$index}.account_id");
         $journal->lines()->delete();
         $debit = BigDecimal::zero()->toScale(4);
         $credit = BigDecimal::zero()->toScale(4);
@@ -155,6 +158,7 @@ class JournalWorkflowService
             $journal->lines()->create([
                 'line_number' => $index + 1, 'account_id' => $line['account_id'],
                 'description' => $line['description'] ?? null, 'service_id' => $line['service_id'] ?? null,
+                'fund_id' => $line['fund_id'] ?? null,
                 'debit' => AccountingDecimal::string($lineDebit), 'credit' => AccountingDecimal::string($lineCredit),
             ]);
         }

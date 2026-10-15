@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Payroll;
 
 use App\Enums\EmploymentStatus;
+use App\Enums\StaffAdvanceStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\SaveEmployeeRequest;
 use App\Models\Employee;
@@ -64,6 +65,10 @@ class EmployeeController extends Controller
             'employee' => $employee, 'sensitive' => $sensitive, 'bankDetails' => $bankDetails, 'history' => $history,
             'components' => $sensitive ? PayrollComponent::query()->where('is_active', true)->orWhereIn('id', $employee->salaryItems->pluck('payroll_component_id'))->orderBy('sort_order')->orderBy('name')->get() : collect(),
             'policyApproved' => $runs->policyApproved(),
+            // Outstanding staff advances carry amounts, so they are loaded only for sensitive users.
+            'advances' => $sensitive && $request->user()->can('staff_advances.view')
+                ? $employee->staffAdvances()->with(['instalments', 'firstRecoveryPeriod:id,name'])->whereIn('status', [StaffAdvanceStatus::Draft->value, StaffAdvanceStatus::Submitted->value, StaffAdvanceStatus::Approved->value, StaffAdvanceStatus::Active->value])->orderByDesc('id')->get()
+                : null,
         ]);
     }
 

@@ -108,7 +108,7 @@ try {
     $recreate($migrationDb);
     [$code] = $run([$php, 'artisan', 'migrate', '--force'], $migrationDb);
     $check('all migrations apply on MySQL/InnoDB', $code === 0);
-    [$code] = $run([$php, 'artisan', 'migrate:rollback', '--step=1', '--force'], $migrationDb);
+    [$code] = $run([$php, 'artisan', 'migrate:rollback', '--path=database/migrations/'.MIGRATION.'.php', '--force'], $migrationDb);
     $check('rollback without shared ledgers succeeds', $code === 0);
 
     $db = new PDO(sprintf('mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4', $env['DB_HOST'] ?? '127.0.0.1', $env['DB_PORT'] ?? '3306', $migrationDb), $env['DB_USERNAME'] ?? '', $env['DB_PASSWORD'] ?? '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
@@ -174,12 +174,12 @@ try {
     $check('same-branch duplicate rejected by validation', $duplicate->fails() && str_contains($duplicate->errors()->first('account_id'), 'already has a cash or bank account on this ledger'));
     $check('third branch on the shared cash ledger passes validation', $validate([...$base, 'type' => 'cash', 'account_id' => $cashLedger->id, 'branch_id' => $branchC->id])->passes());
 
-    [$code, $output] = $run([$php, 'artisan', 'migrate:rollback', '--step=1', '--force'], $migrationDb);
+    [$code, $output] = $run([$php, 'artisan', 'migrate:rollback', '--path=database/migrations/'.MIGRATION.'.php', '--force'], $migrationDb);
     $check('unsafe rollback refused while a ledger is shared', $code !== 0 && str_contains($output, 'already shared'));
     $check('schema unchanged after the refused rollback', isset($indexes($db)['financial_accounts_account_branch_unique']) && (int) $db->query("SELECT COUNT(*) FROM migrations WHERE migration = '".MIGRATION."'")->fetchColumn() === 1);
 
     DB::table('financial_accounts')->where('name', 'Cash B')->delete();
-    [$code] = $run([$php, 'artisan', 'migrate:rollback', '--step=1', '--force'], $migrationDb);
+    [$code] = $run([$php, 'artisan', 'migrate:rollback', '--path=database/migrations/'.MIGRATION.'.php', '--force'], $migrationDb);
     $restored = $indexes($db);
     $check('rollback succeeds once no ledger is shared', $code === 0 && ($restored['financial_accounts_account_id_unique']['unique'] ?? false) && ! isset($restored['financial_accounts_account_branch_unique']));
     $check('records intact after rollback', $snapshot() === $existing);

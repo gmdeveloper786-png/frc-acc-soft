@@ -155,7 +155,7 @@ class OperationalReportController extends Controller
         }
 
         return JournalLine::query()->with(['journalEntry.branch', 'journalEntry.voucherType', 'account'])
-            ->whereIn('account_id', $financialAccounts->pluck('account_id'))->whereHas('journalEntry', fn ($q) => $q->where('status', 'posted')->whereIn('branch_id', $access->scope($request->user())->select('id'))
+            ->whereIn('account_id', $financialAccounts->pluck('account_id'))->whereHas('journalEntry', fn ($q) => $q->whereIn('status', ['posted', 'reversed'])->whereIn('branch_id', $access->scope($request->user())->select('id'))
             ->where(function ($pairs) use ($financialAccounts): void {
                 foreach ($financialAccounts as $account) {
                     $pairs->orWhere(fn ($pair) => $pair->where('journal_entries.branch_id', $account->branch_id)->where('journal_lines.account_id', $account->account_id));

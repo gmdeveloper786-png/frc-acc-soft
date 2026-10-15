@@ -10,6 +10,7 @@ use App\Models\AccountingPeriod;
 use App\Models\DonationCategory;
 use App\Models\FinancialAccount;
 use App\Models\FrcService;
+use App\Models\Fund;
 use App\Models\OperationalTransaction;
 use App\Models\PurchaseBill;
 use App\Models\Vendor;
@@ -61,7 +62,7 @@ class OperationalTransactionController extends Controller
     public function show(Request $request, OperationalTransaction $transaction, BranchAccess $access, OperationalTransactionService $service): View
     {
         abort_unless($request->user()->can($transaction->type->permissionPrefix().'.view') && $access->canAccess($request->user(), $transaction->branch), 403);
-        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'donationCategory', 'purchaseBill', 'journalEntry', 'creator', 'approver']);
+        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory', 'purchaseBill', 'journalEntry', 'creator', 'approver']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
 
         $canApprove = $service->canApprove($transaction, $request->user());
@@ -142,7 +143,8 @@ class OperationalTransactionController extends Controller
             'ledgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->orderBy('code')->get(),
             'vendors' => Vendor::query()->where('is_active', true)->orderBy('name')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
-            'donationCategories' => DonationCategory::query()->where('is_active', true)->orderBy('name')->get(),
+            'donationCategories' => DonationCategory::query()->with('fund')->where('is_active', true)->orderBy('name')->get(),
+            'funds' => Fund::query()->active()->orderBy('code')->get(),
             'bills' => PurchaseBill::query()->with(['vendor', 'postedPayments'])->whereIn('branch_id', $branchIds)->where('status', 'posted')->orderByDesc('invoice_date')->get(),
         ];
     }

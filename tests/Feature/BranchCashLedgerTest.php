@@ -11,6 +11,8 @@ use App\Models\Branch;
 use App\Models\FinancialAccount;
 use App\Models\FiscalYear;
 use App\Models\JournalEntry;
+use App\Models\JournalLine;
+use App\Models\OperationalTransaction;
 use App\Models\User;
 use App\Models\VoucherType;
 use App\Services\GeneralLedgerService;
@@ -227,4 +229,18 @@ test('every report counts a shared cash ledger once per branch without double co
 
     $csv = $this->actingAs($this->admin)->get(route('reports.books.export', ['kind' => 'cash', 'format' => 'csv']))->assertOk()->streamedContent();
     expect($csv)->toContain('Totals')->toContain('1250.0000');
+});
+
+test('a reversed receipt nets to zero in the cash book and the account balance', function () {
+    $original = branchCashReceipt($this, $this->cashA, '1000.0000');
+    $transaction = OperationalTransaction::query()->where('journal_entry_id', $original->id)->firstOrFail();
+    app(OperationalTransactionService::class)->reverse($transaction, AccountingPeriod::query()->firstOrFail(), '2026-01-20', 'Receipt entered in error', $this->admin);
+
+    $book = $this->actingAs($this->admin)->get(route('reports.books', ['kind' => 'cash', 'financial_account_id' => $this->cashA->id]))->assertOk();
+    $book->assertSee($original->voucher_number);
+    $lines = JournalLine::query()->where('account_id', $this->cashLedger->id)->whereHas('journalEntry', fn ($q) => $q->where('branch_id', $this->branchA->id))->get();
+    expect($lines)->toHaveCount(2);
+
+    $this->actingAs($this->admin)->get(route('financial-accounts.index'))->assertOk()->assertSeeInOrder(['Cash - Shahrah-e-Faisal', '0.00']);
+    expect(branchCashTrialBalance($this, [$this->branchA->id])[0])->toBe('0.0000');
 });

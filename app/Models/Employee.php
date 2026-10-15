@@ -42,6 +42,11 @@ class Employee extends Model
         return $this->hasMany(PayrollRunLine::class);
     }
 
+    public function staffAdvances(): HasMany
+    {
+        return $this->hasMany(StaffAdvance::class);
+    }
+
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');

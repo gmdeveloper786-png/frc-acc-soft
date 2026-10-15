@@ -100,7 +100,7 @@ class FinancialAccountController extends Controller
         if ($accounts->isEmpty()) {
             return [];
         }
-        $sums = $this->postedLines($accounts)->where('journal_entries.status', 'posted')
+        $sums = $this->postedLines($accounts)->whereIn('journal_entries.status', ['posted', 'reversed'])
             ->groupBy('journal_lines.account_id', 'journal_entries.branch_id')
             ->selectRaw('journal_lines.account_id as account_id, journal_entries.branch_id as branch_id, SUM(journal_lines.debit) as debit, SUM(journal_lines.credit) as credit')
             ->get()->keyBy(fn ($sum): string => $sum->account_id.':'.$sum->branch_id);

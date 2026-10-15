@@ -3,6 +3,7 @@
 @section('page-actions')
 <div class="d-flex gap-2">
     @if($sensitive)<a class="btn btn-outline-primary" href="{{ route('payroll-runs.register',$run) }}">Payroll register</a>@endif
+    @if($payslipsAvailable)<a class="btn btn-outline-primary" href="{{ route('payroll-runs.payslips',$run) }}">Print all payslips</a>@endif
     <a class="btn btn-outline-primary" href="{{ route('payroll-runs.index') }}">Back</a>
 </div>
 @endsection
@@ -49,7 +50,7 @@
     <div class="card-heading"><div><span class="section-kicker">{{ $sensitive ? 'Gross = Σ earnings · Net = gross − deductions' : 'Amounts hidden — sensitive payroll permission required' }}</span><h2>Payroll lines</h2></div>@if($errorLines > 0)<span class="status-badge danger">{{ $errorLines }} lines with errors</span>@else<span class="status-badge neutral">{{ $run->lines->count() }} employees</span>@endif</div>
     <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Code</th><th>Employee</th>
         @if($sensitive) @foreach($components as $component)<th class="text-end">{{ $component->name }}<span class="table-subtext">{{ $component->type->label() }}</span></th>@endforeach <th class="text-end">Gross</th><th class="text-end">Deductions</th><th class="text-end">Net</th>@endif
-        <th>Validation</th>@if($editable && $canManage)<th></th>@endif</tr></thead><tbody>
+        <th>Validation</th>@if(($editable && $canManage) || $payslipsAvailable)<th></th>@endif</tr></thead><tbody>
     @forelse($run->lines as $line)
         <tr>
             <td><code>{{ $line->employee->employee_code }}</code></td>
@@ -64,6 +65,9 @@
                 <td class="text-end font-monospace"><strong>{{ number_format((float)$line->net_amount,2) }}</strong></td>
             @endif
             <td>@if(!empty($line->validation_errors)) @foreach($line->validation_errors as $error)<span class="status-badge danger d-block mb-1">{{ $error }}</span>@endforeach @elseif($status === \App\Enums\PayrollRunStatus::Draft || $status === \App\Enums\PayrollRunStatus::Rejected)<span class="status-badge neutral">Not validated</span>@else<span class="status-badge success">OK</span>@endif</td>
+            @if($payslipsAvailable)
+            <td class="text-nowrap"><a class="btn btn-sm btn-outline-primary" href="{{ route('payroll-runs.payslip',[$run,$line]) }}">Payslip</a></td>
+            @endif
             @if($editable && $canManage)
             <td class="text-nowrap">
                 @if($sensitive)<a class="btn btn-sm btn-outline-primary" href="{{ route('payroll-runs.lines.edit',[$run,$line]) }}">Edit</a>@endif
@@ -86,6 +90,34 @@
     </form>
     @endif
 </section>
+
+@if($dueRecoveries->isNotEmpty())
+@php
+    $lineEmployees = $run->lines->pluck('employee_id')->all();
+    $lineItems = $run->lines->keyBy('employee_id');
+@endphp
+<section class="surface-card mb-4">
+    <div class="card-heading"><div><span class="section-kicker">Staff advances — unrecovered instalments due by {{ $run->period->name }}</span><h2>Due advance recoveries</h2></div><span class="status-badge pending">{{ $dueRecoveries->count() }} due</span></div>
+    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Employee</th><th>Advances</th><th>Recovery component</th><th class="text-end">Due</th><th class="text-end">On this run</th></tr></thead><tbody>
+    @foreach($dueRecoveries as $due)
+        @php
+            $onRun = $lineItems->get($due['employee']->id)?->items->firstWhere('payroll_component_id', $due['component_id'])?->amount;
+        @endphp
+        <tr>
+            <td><code>{{ $due['employee']->employee_code }}</code> {{ $due['employee']->name }}@unless(in_array($due['employee']->id, $lineEmployees, true))<span class="table-subtext">Not on this run</span>@endunless</td>
+            <td>{{ implode(', ', $due['advances']) }}</td>
+            <td>{{ $due['component_name'] }}</td>
+            <td class="text-end font-monospace">{{ number_format((float) $due['due'], 2) }}</td>
+            <td class="text-end font-monospace">{{ $onRun !== null ? number_format((float) $onRun, 2) : '—' }}</td>
+        </tr>
+    @endforeach
+    </tbody></table></div>
+    <p class="card-copy">Recovery is recorded only when this run is posted. Amounts can be adjusted on each line before validation.</p>
+    @if($editable && $canManage)
+    <form method="POST" action="{{ route('payroll-runs.advance-recoveries',$run) }}" data-submit-once>@csrf<button class="btn btn-outline-primary" data-confirm="Set the recovery component of each listed employee on this draft to the amount due?">Enter due recoveries on the lines</button></form>
+    @endif
+</section>
+@endif
 
 <section class="surface-card mb-4">
     <div class="card-heading"><div><span class="section-kicker">Workflow</span><h2>Actions</h2></div></div>

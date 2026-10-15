@@ -5,6 +5,7 @@ namespace App\Services\Reports\Payroll;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\PayrollComponentType;
 use App\Enums\PayrollRunStatus;
+use App\Enums\StaffAdvanceStatus;
 use App\Models\AccountingPeriod;
 use App\Models\Branch;
 use App\Models\Employee;
@@ -14,6 +15,7 @@ use App\Models\PayrollImportRow;
 use App\Models\PayrollRun;
 use App\Models\PayrollRunLine;
 use App\Models\PayrollRunPayment;
+use App\Models\StaffAdvance;
 use App\Models\User;
 use App\Services\AccountingDecimal;
 use App\Services\BranchAccess;
@@ -46,10 +48,11 @@ class PayrollReportService
         'payment-status' => 'Salary Payment Status',
         'deductions' => 'Deductions Summary',
         'import-errors' => 'Import Validation Errors',
+        'advances-outstanding' => 'Staff Advances Outstanding',
     ];
 
     /** Reports whose whole content is salary amounts: refused without payroll.view_sensitive. */
-    public const AMOUNT_ONLY = ['register', 'deductions'];
+    public const AMOUNT_ONLY = ['register', 'deductions', 'advances-outstanding'];
 
     private const ACCRUED_STATUSES = [PayrollRunStatus::Posted, PayrollRunStatus::Paid];
 
@@ -95,6 +98,7 @@ class PayrollReportService
             'payment-status' => $this->paymentStatus($input, $scope, $sensitive, $perPage),
             'deductions' => $this->deductions($input, $scope),
             'import-errors' => $this->importErrors($actor, $input, $scope, $sensitive, $perPage),
+            'advances-outstanding' => $this->advancesOutstanding($input, $scope),
         };
 
         return [
@@ -121,6 +125,63 @@ class PayrollReportService
     }
 
     // --- Reports -----------------------------------------------------------------
+
+    /**
+     * Staff advances and loans with their stored recovery: principal, amount
+     * recovered through posted payroll runs and the outstanding balance.
+     *
+     * @param  array<string, mixed>  $input
+     * @param  array<string, mixed>  $scope
+     * @return array<string, mixed>
+     */
+    private function advancesOutstanding(array $input, array $scope): array
+    {
+        $statuses = [StaffAdvanceStatus::Approved, StaffAdvanceStatus::Active, StaffAdvanceStatus::Settled];
+        $selected = is_string($input['status'] ?? null) ? StaffAdvanceStatus::tryFrom($input['status']) : null;
+        $selected = in_array($selected, $statuses, true) ? $selected : null;
+        $listed = $selected ? [$selected] : [StaffAdvanceStatus::Approved, StaffAdvanceStatus::Active];
+        $employees = Employee::query()->whereIn('branch_id', $scope['ids'])->whereHas('staffAdvances')->orderBy('employee_code')->get(['id', 'employee_code', 'name']);
+        $filters = [
+            $this->filter('status', 'Advance status', $input, ['' => 'Approved and active'] + collect($statuses)->mapWithKeys(fn (StaffAdvanceStatus $status): array => [$status->value => $status->label()])->all()),
+            $this->filter('employee_id', 'Employee', $input, ['' => 'All employees'] + $employees->mapWithKeys(fn (Employee $employee): array => [(string) $employee->id => $employee->employee_code.' — '.$employee->name])->all()),
+        ];
+
+        $advances = StaffAdvance::query()->with(['employee:id,employee_code,name', 'branch:id,name', 'instalments.period:id,name'])
+            ->whereIn('branch_id', $scope['ids'])->whereIn('status', array_map(fn (StaffAdvanceStatus $status): string => $status->value, $listed))
+            ->when(filled($input['employee_id'] ?? null), fn (Builder $query) => $query->where('employee_id', (int) $input['employee_id']))
+            ->orderBy('branch_id')->orderBy('id')->get();
+
+        $zero = BigDecimal::zero()->toScale(4);
+        $totals = ['principal' => $zero, 'recovered' => $zero, 'outstanding' => $zero];
+        $rows = [];
+        foreach ($advances as $advance) {
+            $open = $advance->instalments->filter(fn ($instalment): bool => AccountingDecimal::of($instalment->outstandingAmount())->isPositive());
+            $row = [
+                'reference' => (string) $advance->reference, 'employee_code' => (string) $advance->employee->employee_code, 'employee' => (string) $advance->employee->name,
+                'branch' => (string) $advance->branch->name, 'type' => $advance->type->label(), 'status' => $advance->status->label(),
+                'next_due' => (string) ($open->first()?->period->name ?? '—'), 'open_instalments' => (string) $open->count(),
+                'principal' => AccountingDecimal::string(AccountingDecimal::of($advance->principal_amount)), 'recovered' => $advance->recoveredAmount(), 'outstanding' => $advance->outstandingAmount(),
+            ];
+            foreach (array_keys($totals) as $key) {
+                $totals[$key] = $totals[$key]->plus(AccountingDecimal::of($row[$key]));
+            }
+            $rows[] = $row;
+        }
+        if ($rows !== []) {
+            $rows[] = ['reference' => 'Total', 'employee_code' => '', 'employee' => count($advances).' advances', 'branch' => '', 'type' => '', 'status' => '', 'next_due' => '', 'open_instalments' => '', '_style' => 'total',
+                ...array_map(fn (BigDecimal $sum): string => AccountingDecimal::string($sum), $totals)];
+        }
+        $columns = [
+            ['key' => 'reference', 'label' => 'Reference'], ['key' => 'employee_code', 'label' => 'Employee code'], ['key' => 'employee', 'label' => 'Employee'],
+            ['key' => 'branch', 'label' => 'Branch'], ['key' => 'type', 'label' => 'Type'], ['key' => 'status', 'label' => 'Status'],
+            ['key' => 'next_due', 'label' => 'Next due period'], ['key' => 'open_instalments', 'label' => 'Open instalments', 'type' => 'number'],
+            ...$this->amountColumns(['principal' => 'Principal', 'recovered' => 'Recovered', 'outstanding' => 'Outstanding']),
+        ];
+
+        return ['filters' => $filters, 'table' => new ReportTable(self::REPORTS['advances-outstanding'], $columns, $rows, [
+            'Branch' => $scope['label'], 'Status' => implode(', ', array_map(fn (StaffAdvanceStatus $status): string => $status->label(), $listed)),
+        ], 'Recovered amounts come only from posted payroll runs that deduct the recovery component. Advance and loan rules are not approved; no interest or rule is applied.')];
+    }
 
     /**
      * @param  array<string, mixed>  $input

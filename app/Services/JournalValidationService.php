@@ -6,15 +6,18 @@ use App\Enums\AccountingPeriodStatus;
 use App\Enums\AccountLevel;
 use App\Enums\FiscalYearStatus;
 use App\Models\JournalEntry;
+use App\Services\Funds\FundRestrictionPolicy;
 use Brick\Math\BigDecimal;
 use Illuminate\Validation\ValidationException;
 
 class JournalValidationService
 {
+    public function __construct(private FundRestrictionPolicy $fundRules) {}
+
     /** @return array{total_debit:string,total_credit:string} */
     public function validate(JournalEntry $journal): array
     {
-        $journal->loadMissing(['lines.account', 'lines.service', 'fiscalYear', 'accountingPeriod', 'branch']);
+        $journal->loadMissing(['lines.account', 'lines.service', 'lines.fund', 'fiscalYear', 'accountingPeriod', 'branch']);
         $errors = [];
         $debit = BigDecimal::zero()->toScale(4);
         $credit = BigDecimal::zero()->toScale(4);
@@ -49,6 +52,19 @@ class JournalValidationService
 
             $debit = $debit->plus($lineDebit);
             $credit = $credit->plus($lineCredit);
+        }
+
+        // Fund checks never block a reversal: correcting posted history must always be possible.
+        if ($journal->reversal_of_id === null && $journal->lines->contains(fn ($line): bool => $line->fund_id !== null)) {
+            foreach ($journal->lines as $index => $line) {
+                if ($line->fund_id && ! $line->fund?->is_active) {
+                    $errors["lines.{$index}.fund_id"] = 'The selected fund is not active.';
+                }
+            }
+            $lines = $journal->lines->map(fn ($line): array => ['fund_id' => $line->fund_id, 'account_id' => $line->account_id, 'debit' => $line->debit])->all();
+            foreach ($this->fundRules->violations($lines) as $index => $message) {
+                $errors["lines.{$index}.account_id"] = $message;
+            }
         }
 
         if ($debit->isZero() || $credit->isZero() || ! $debit->isEqualTo($credit)) {

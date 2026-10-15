@@ -12,6 +12,16 @@ use Spatie\Permission\PermissionRegistrar;
 
 class RolePermissionSeeder extends Seeder
 {
+    /** @var array<string, list<string>> Grants for bank reconciliation, imprest, funds and staff advances. */
+    public const RELEASE_GRANTS = [
+        'Accountant' => ['bank_reconciliation.view', 'bank_reconciliation.prepare', 'imprest.view', 'imprest.manage', 'imprest.replenish', 'funds.view', 'funds.manage', 'grants.manage', 'fund_reports.view', 'staff_advances.view', 'staff_advances.manage'],
+        'Cashier / Fee Clerk' => ['imprest.view'],
+        'Approver / Manager' => ['bank_reconciliation.view', 'bank_reconciliation.approve', 'imprest.view', 'funds.view', 'fund_reports.view', 'staff_advances.view', 'staff_advances.approve'],
+        'Director' => ['bank_reconciliation.view', 'bank_reconciliation.approve', 'imprest.view', 'funds.view', 'fund_reports.view', 'staff_advances.view', 'staff_advances.approve'],
+        'Management / Board' => ['bank_reconciliation.view', 'funds.view', 'fund_reports.view'],
+        'Auditor' => ['bank_reconciliation.view', 'imprest.view', 'funds.view', 'fund_reports.view', 'staff_advances.view'],
+    ];
+
     /** @var array<string, list<string>> */
     private array $groups = [
         'Dashboard' => ['dashboard.view'],
@@ -43,6 +53,10 @@ class RolePermissionSeeder extends Seeder
         'Payroll' => ['payroll.view', 'payroll.manage', 'payroll.approve', 'payroll.view_sensitive', 'payroll.import', 'payroll.submit', 'payroll.post', 'payroll.pay', 'payroll_components.manage', 'employees.view', 'employees.manage'],
         'Audit' => ['audit_logs.view'],
         'FRC Integration' => ['frc_integration.view', 'frc_integration.sync', 'frc_integration.post', 'frc_integration.reverse', 'fee_settlement.manage'],
+        'Bank Reconciliation' => ['bank_reconciliation.view', 'bank_reconciliation.prepare', 'bank_reconciliation.approve'],
+        'Petty Cash Imprest' => ['imprest.view', 'imprest.manage', 'imprest.replenish'],
+        'Funds & Grants' => ['funds.view', 'funds.manage', 'grants.manage', 'fund_reports.view'],
+        'Staff Advances' => ['staff_advances.view', 'staff_advances.manage', 'staff_advances.approve'],
     ];
 
     public function run(): void
@@ -128,6 +142,11 @@ class RolePermissionSeeder extends Seeder
             $roles[$roleName]['permissions'] = array_merge($roles[$roleName]['permissions'], $frcReaders);
         }
         $roles[SystemRole::Accountant->value]['permissions'] = array_merge($roles[SystemRole::Accountant->value]['permissions'], ['frc_integration.view', 'frc_integration.sync', 'frc_integration.post', 'frc_integration.reverse', 'fee_settlement.manage']);
+
+        // Bank reconciliation, petty cash imprest, funds and grants, staff advances.
+        foreach (self::RELEASE_GRANTS as $roleName => $names) {
+            $roles[$roleName]['permissions'] = array_merge($roles[$roleName]['permissions'], $names);
+        }
 
         foreach ($roles as $name => $definition) {
             $role = Role::query()->updateOrCreate(

@@ -74,6 +74,7 @@ class JournalReversalService
                     'account_id' => $line->account_id,
                     'description' => $line->description,
                     'service_id' => $line->service_id,
+                    'fund_id' => $line->fund_id,
                     'debit' => $line->credit,
                     'credit' => $line->debit,
                 ]);

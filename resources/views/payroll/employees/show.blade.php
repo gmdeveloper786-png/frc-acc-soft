@@ -73,6 +73,27 @@
 </section>
 @endif
 
+@if($advances !== null)
+<section class="surface-card mb-4">
+    <div class="card-heading"><div><span class="section-kicker">Sensitive — not yet settled or cancelled</span><h2>Outstanding staff advances</h2></div>@can('staff_advances.manage')<a class="btn btn-sm btn-outline-primary" href="{{ route('staff-advances.create') }}">+ New advance</a>@endcan</div>
+    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Reference</th><th>Type</th><th>First recovery</th><th>Status</th><th class="text-end">Principal</th><th class="text-end">Outstanding</th><th></th></tr></thead><tbody>
+    @forelse($advances as $advance)
+        <tr>
+            <td><code>{{ $advance->reference }}</code></td>
+            <td>{{ $advance->type->label() }}</td>
+            <td>{{ $advance->firstRecoveryPeriod->name }}</td>
+            <td><span class="status-badge {{ $advance->status->badge() }}">{{ $advance->status->label() }}</span></td>
+            <td class="text-end font-monospace">{{ number_format((float)$advance->principal_amount,2) }}</td>
+            <td class="text-end font-monospace">{{ number_format((float)$advance->outstandingAmount(),2) }}</td>
+            <td><a class="btn btn-sm btn-outline-primary" href="{{ route('staff-advances.show',$advance) }}">View</a></td>
+        </tr>
+    @empty
+        <tr><td colspan="7"><x-empty-state title="No outstanding advances" description="This employee has no advance or loan that is still being recovered." /></td></tr>
+    @endforelse
+    </tbody></table></div>
+</section>
+@endif
+
 @can('payroll.view')
 <section class="surface-card">
     <div class="card-heading"><div><span class="section-kicker">Most recent 24 runs</span><h2>Payroll history</h2></div></div>

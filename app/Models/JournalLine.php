@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['journal_entry_id', 'account_id', 'line_number', 'description', 'debit', 'credit', 'service_id'])]
+#[Fillable(['journal_entry_id', 'account_id', 'line_number', 'description', 'debit', 'credit', 'service_id', 'fund_id'])]
 class JournalLine extends Model
 {
     protected static function booted(): void
@@ -44,5 +44,11 @@ class JournalLine extends Model
     public function service(): BelongsTo
     {
         return $this->belongsTo(FrcService::class, 'service_id');
+    }
+
+    /** Optional fund. System journals (fee posting, payroll, depreciation, year-end) leave it null. */
+    public function fund(): BelongsTo
+    {
+        return $this->belongsTo(Fund::class);
     }
 }

@@ -60,6 +60,7 @@ class PayrollRunService
         private JournalReversalService $reversal,
         private OperationalTransactionService $transactions,
         private ManualJournalGuard $guard,
+        private StaffAdvanceRecoveryService $advanceRecovery,
     ) {}
 
     /** Whether the Director-controlled payroll calculation policy has been approved. */
@@ -335,6 +336,8 @@ class PayrollRunService
             $run->update(['status' => PayrollRunStatus::Posted, 'journal_entry_id' => $journal->id, 'posted_by' => $actor->id, 'posted_at' => now()]);
             $this->record($run, 'posted', PayrollRunStatus::Approved, $actor, 'Voucher '.$journal->voucher_number);
             $this->audit->log('payroll.posted', $run, ['journal_entry_id' => $journal->id, 'voucher_number' => $journal->voucher_number, ...$this->totals($run)]);
+            // Staff advance instalments are recovered only by a posted run.
+            $this->advanceRecovery->syncForRun($run);
 
             return $run->refresh();
         }, 3);
@@ -455,6 +458,7 @@ class PayrollRunService
             $run->update(['status' => PayrollRunStatus::Reversed, 'active_key' => null, 'reversed_by' => $actor->id, 'reversed_at' => now(), 'reversal_reason' => $reason]);
             $this->record($run, 'reversed', PayrollRunStatus::Posted, $actor, $reason);
             $this->audit->log('payroll.reversed', $run, ['reversal_journal_id' => $reversal->id, 'reason' => $reason]);
+            $this->advanceRecovery->syncForRun($run);
 
             return $run->refresh();
         }, 3);

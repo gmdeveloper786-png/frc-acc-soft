@@ -78,7 +78,7 @@
                     @can('donations.manage_categories')<a href="{{ route('donation-categories.index') }}" class="sidebar-link"><span class="sidebar-icon">DC</span><span class="sidebar-text">Donation Categories</span></a>@endcan
                 @endif
 
-                @foreach(['assets', 'inventory', 'budgets', 'payroll', 'statements', 'cashflow', 'ledger-exports', 'operational-reports', 'payroll-reports', 'frc-integration', 'fee-posting'] as $navModule) @include('layouts.partials.nav-'.$navModule) @endforeach
+                @foreach(['assets', 'inventory', 'budgets', 'payroll', 'statements', 'cashflow', 'ledger-exports', 'operational-reports', 'payroll-reports', 'frc-integration', 'fee-posting', 'bank-reconciliation', 'imprest', 'funds'] as $navModule) @include('layouts.partials.nav-'.$navModule) @endforeach
 
                 @if(auth()->user()->canAny(['cash_books.view', 'bank_books.view', 'finance_reports.view']))
                     <span class="sidebar-label">Finance Reports</span>
