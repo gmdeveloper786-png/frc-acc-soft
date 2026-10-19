@@ -232,3 +232,22 @@ test('paginated review screen uses bootstrap pagination without unsized tailwind
         ->and(Account::query()->count())->toBe(0);
     $this->get(route('account-imports.show', [$import, 'page' => 5]))->assertOk()->assertSee('page-link', false);
 });
+
+test('a parent approval error is shown once beside source accounts and other errors still reach the page summary', function () {
+    $import = app(AccountImportService::class)->preview(clientCoaUpload(), $this->admin);
+    $child = $import->rows()->where('code', '21502')->firstOrFail();
+    $page = route('account-imports.show', $import);
+    $message = 'Approve required parent 215 together with or before 21502.';
+
+    $html = $this->from($page)->followingRedirects()
+        ->post(route('account-imports.decide', $import), ['rows' => [$child->id], 'decision' => 'approved', 'notes' => 'Reviewer checked this inter-unit ledger'])
+        ->assertOk()->getContent();
+    expect(substr_count($html, $message))->toBe(1)
+        ->and(strpos($html, $message))->toBeGreaterThan(strpos($html, 'Source accounts'))
+        ->and($child->fresh()->review_status)->toBe('pending')
+        ->and(Account::query()->count())->toBe(0);
+
+    $this->from($page)->followingRedirects()
+        ->post(route('account-imports.decide', $import), ['rows' => [$child->id], 'decision' => 'unknown'])
+        ->assertOk()->assertSee('Please review the highlighted information.')->assertSee('The selected decision is invalid.');
+});

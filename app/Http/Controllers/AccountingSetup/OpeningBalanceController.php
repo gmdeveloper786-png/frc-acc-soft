@@ -4,14 +4,13 @@ namespace App\Http\Controllers\AccountingSetup;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreOpeningBalanceRequest;
-use App\Models\Account;
 use App\Models\Branch;
 use App\Models\FiscalYear;
 use App\Models\OpeningBalanceBatch;
 use App\Services\BranchAccess;
 use App\Services\OpeningBalancePostingService;
 use App\Services\OpeningBalanceService;
-use App\Support\AppSettings;
+use App\Services\OpeningBalanceValidationService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
@@ -26,12 +25,12 @@ class OpeningBalanceController extends Controller
         return view('accounting-setup.opening-balances.index', compact('batches'));
     }
 
-    public function create(Request $request, BranchAccess $access, AppSettings $settings): View
+    public function create(Request $request, BranchAccess $access, OpeningBalanceValidationService $validator): View
     {
         $fiscalYears = FiscalYear::query()->orderByDesc('start_date')->get();
         $branches = $access->scope($request->user())->orderBy('name')->get();
-        $accounts = Account::query()->where('is_active', true)->where('is_postable', true)->where('level', 'ledger')->orderBy('code')->get();
-        $openingDate = $settings->string('fiscal.initial_opening_date', '2026-01-01');
+        $accounts = $validator->eligibleAccounts()->with('parent')->orderBy('code')->get();
+        $openingDate = $fiscalYears->first()?->start_date->toDateString();
 
         return view('accounting-setup.opening-balances.create', compact('fiscalYears', 'branches', 'accounts', 'openingDate'));
     }

@@ -35,6 +35,7 @@ beforeEach(function () {
     $this->branch = Branch::factory()->create(['status' => 'publish']);
     $this->maker = bypassUser(SystemRole::Accountant, $this->branch);
     $this->checker = bypassUser(SystemRole::Administrator, $this->branch);
+    $this->poster = bypassUser(SystemRole::Administrator, $this->branch);
     $this->year = FiscalYear::factory()->create(['start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     $this->period = AccountingPeriod::factory()->create(['fiscal_year_id' => $this->year, 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
     $this->cashLedger = Account::factory()->create();
@@ -85,7 +86,7 @@ test('a manual journal cannot pay money out by crediting cash or bank', function
 
     // Even a journal forced into the approved state cannot be posted or approved.
     $journal->forceFill(['status' => JournalStatus::Approved, 'submitted_by' => $this->maker->id, 'approved_by' => $this->checker->id])->save();
-    expect(fn () => app(JournalPostingService::class)->post($journal->fresh(), $this->checker))->toThrow(ValidationException::class);
+    expect(fn () => app(JournalPostingService::class)->post($journal->fresh(), $this->poster))->toThrow(ValidationException::class);
     $journal->forceFill(['status' => JournalStatus::Submitted])->save();
     expect(fn () => $workflow->approve($journal->fresh(), $this->checker))->toThrow(ValidationException::class)
         ->and($journal->fresh()->voucher_number)->toBeNull()
@@ -108,7 +109,7 @@ test('forged source references in a request cannot make a manual journal trusted
 
     // A source label written straight into the row gives no exemption on the manual path.
     $journal->forceFill(['source_system' => 'accounting', 'source_type' => 'cash_payment', 'source_key' => 'operational_transaction:999', 'status' => JournalStatus::Approved, 'approved_by' => $this->checker->id])->save();
-    expect(fn () => app(JournalPostingService::class)->post($journal->fresh(), $this->checker))->toThrow(ValidationException::class);
+    expect(fn () => app(JournalPostingService::class)->post($journal->fresh(), $this->poster))->toThrow(ValidationException::class);
     $unlabelled = app(JournalWorkflowService::class)->create(manualJournal($this, $this->expense->id, $this->income->id), $this->maker);
     expect(fn () => app(JournalPostingService::class)->postSystem($unlabelled, $this->checker))->toThrow(LogicException::class);
 });
@@ -120,13 +121,16 @@ test('legitimate manual journals still post: non cash entries, cash debits and c
         'cash debit' => manualJournal($this, $this->cashLedger->id, $this->income->id, '700.0000'),
         'contra' => manualJournal($this, $this->cashLedger->id, $this->bankLedger->id, '900000.0000'),
     ];
+    $director = bypassUser(SystemRole::Director, $this->branch);
     foreach ($cases as $payload) {
         $this->actingAs($this->maker);
         $journal = $workflow->create($payload, $this->maker);
         $workflow->submit($journal, $this->maker);
-        $this->actingAs($this->checker);
-        $workflow->approve($journal->fresh(), $this->checker);
-        expect(app(JournalPostingService::class)->post($journal->fresh(), $this->checker)->status)->toBe(JournalStatus::Posted);
+        // The PKR 900,000 contra transfer is above the Director threshold.
+        $approver = $workflow->canApprove($journal->fresh(), $this->checker) ? $this->checker : $director;
+        $this->actingAs($approver);
+        $workflow->approve($journal->fresh(), $approver);
+        expect(app(JournalPostingService::class)->post($journal->fresh(), $this->poster)->status)->toBe(JournalStatus::Posted);
     }
     expect(JournalEntry::query()->where('status', JournalStatus::Posted->value)->count())->toBe(3);
 });

@@ -29,7 +29,7 @@ class RoleController extends Controller
      */
     public function create(): View
     {
-        return view('administration.roles.create', ['permissionGroups' => $this->permissionGroups()]);
+        return view('administration.roles.create', ['permissionGroups' => $this->permissionGroups(null)]);
     }
 
     /**
@@ -69,7 +69,7 @@ class RoleController extends Controller
         $this->guardAuthorityRole($request, $role, $authority);
         $role->load('permissions');
 
-        return view('administration.roles.edit', ['role' => $role, 'permissionGroups' => $this->permissionGroups()]);
+        return view('administration.roles.edit', ['role' => $role, 'permissionGroups' => $this->permissionGroups($role)]);
     }
 
     /**
@@ -101,18 +101,24 @@ class RoleController extends Controller
     /** A role that carries Director authority may only be changed by a Director. */
     private function guardAuthorityRole(Request $request, Role $role, ApprovalAuthorityService $authority): void
     {
-        abort_if($role->approval_authority !== null && ! $authority->mayManageDirectorRole($request->user()), 403, 'A role that carries Director approval authority can only be changed by a Director.');
+        // The same check decides whether the role screens show an Edit button.
+        abort_unless($authority->mayEditRole($request->user(), $role), 403, 'A role that carries Director approval authority can only be changed by a Director.');
     }
 
     /**
      * A user may only add permissions they hold themselves. Permissions the
-     * role already carries may stay or be removed.
+     * role already carries may stay or be removed. Director-only permissions
+     * are never added to a role that does not carry Director authority.
      *
      * @param  list<string>  $permissions
      */
     private function ensureGrantable(Request $request, ?Role $role, array $permissions): void
     {
         $added = collect($permissions)->diff($role ? $role->permissions()->pluck('name') : []);
+        $directorOnly = $added->intersect(ApprovalAuthorityService::DIRECTOR_ONLY_PERMISSIONS)->values()->all();
+        if ($directorOnly !== [] && $role?->approval_authority === null) {
+            throw ValidationException::withMessages(['permissions' => 'These permissions belong only to the Director role and cannot be added to another role: '.implode(', ', $directorOnly).'.']);
+        }
         $missing = $added->diff($request->user()->getAllPermissions()->pluck('name'))->values()->all();
         if ($missing !== []) {
             throw ValidationException::withMessages(['permissions' => 'You can only grant permissions you hold yourself. Not held: '.implode(', ', $missing).'.']);
@@ -139,8 +145,15 @@ class RoleController extends Controller
         return $data;
     }
 
-    private function permissionGroups(): array
+    /** Director-only permissions are offered only on a role that already carries them or Director authority. */
+    private function permissionGroups(?Role $role): array
     {
-        return Permission::query()->orderBy('group_name')->orderBy('name')->get()->groupBy('group_name')->all();
+        $kept = $role ? $role->permissions->pluck('name')->all() : [];
+
+        return Permission::query()->orderBy('group_name')->orderBy('name')->get()
+            ->reject(fn (Permission $permission): bool => $role?->approval_authority === null
+                && in_array($permission->name, ApprovalAuthorityService::DIRECTOR_ONLY_PERMISSIONS, true)
+                && ! in_array($permission->name, $kept, true))
+            ->groupBy('group_name')->all();
     }
 }

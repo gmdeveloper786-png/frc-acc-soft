@@ -52,10 +52,11 @@ function submittedPo(object $test, string $total, ?User $maker = null): Purchase
     return $service->submit($order, $maker)->fresh();
 }
 
-test('administrator holds every permission but not director approval authority', function () {
+test('administrator holds neither director only permissions nor director approval authority', function () {
     $authority = app(ApprovalAuthorityService::class);
 
-    expect($this->administrator->can('purchase_orders.approve_high_value'))->toBeTrue()
+    expect($this->administrator->can('purchase_orders.approve_high_value'))->toBeFalse()
+        ->and($this->administrator->can('purchase_orders.approve'))->toBeTrue()
         ->and($authority->holdsDirectorRole($this->administrator))->toBeFalse()
         ->and($authority->holdsDirectorRole($this->approver))->toBeFalse()
         ->and($authority->holdsDirectorRole($this->director))->toBeTrue()

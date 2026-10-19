@@ -9,18 +9,17 @@ use App\Models\FiscalYear;
 use App\Models\OpeningBalanceImport;
 use App\Services\BranchAccess;
 use App\Services\OpeningBalanceImportService;
-use App\Support\AppSettings;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
 
 class OpeningBalanceImportController extends Controller
 {
-    public function create(Request $request, BranchAccess $access, AppSettings $settings): View
+    public function create(Request $request, BranchAccess $access): View
     {
         $fiscalYears = FiscalYear::query()->orderByDesc('start_date')->get();
         $branches = $access->scope($request->user())->orderBy('name')->get();
-        $openingDate = $settings->string('fiscal.initial_opening_date', '2026-01-01');
+        $openingDate = $fiscalYears->first()?->start_date->toDateString();
 
         return view('accounting-setup.opening-balance-imports.create', compact('fiscalYears', 'branches', 'openingDate'));
     }
@@ -34,12 +33,13 @@ class OpeningBalanceImportController extends Controller
         return redirect()->route('opening-balance-imports.show', $import)->with('status', 'Import preview created. No balances were posted.');
     }
 
-    public function show(Request $request, OpeningBalanceImport $openingBalanceImport, BranchAccess $access): View
+    public function show(Request $request, OpeningBalanceImport $openingBalanceImport, OpeningBalanceImportService $service, BranchAccess $access): View
     {
         abort_unless($access->canAccess($request->user(), $openingBalanceImport->branch), 403);
         $openingBalanceImport->load(['rows.account', 'branch', 'fiscalYear']);
+        $displayAmounts = $service->displayAmounts($openingBalanceImport);
 
-        return view('accounting-setup.opening-balance-imports.show', compact('openingBalanceImport'));
+        return view('accounting-setup.opening-balance-imports.show', compact('openingBalanceImport', 'displayAmounts'));
     }
 
     public function apply(Request $request, OpeningBalanceImport $openingBalanceImport, OpeningBalanceImportService $service, BranchAccess $access): RedirectResponse

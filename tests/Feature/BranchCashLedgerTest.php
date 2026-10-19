@@ -39,7 +39,7 @@ beforeEach(function () {
     $this->branchB = Branch::factory()->create(['name' => 'Malir Town', 'status' => 'publish']);
     $this->year = FiscalYear::factory()->create(['start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     AccountingPeriod::factory()->create(['fiscal_year_id' => $this->year, 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
-    $this->cashLedger = Account::factory()->create(['code' => '11102', 'name' => 'Cash in Hand - Rehab Centre']);
+    $this->cashLedger = Account::factory()->create(['code' => '11102', 'name' => 'Cash in Hand - Rehab Centre', 'financial_account_type' => 'cash']);
     $this->income = Account::factory()->create(['code' => '42102', 'name' => 'Therapy Session Fees', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
     $this->expense = Account::factory()->create(['code' => '53101', 'name' => 'Rent', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
     $this->cashA = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Cash - Shahrah-e-Faisal', 'branch_id' => $this->branchA, 'account_id' => $this->cashLedger]);
@@ -173,7 +173,7 @@ test('receipts and payments names a shared ledger after the account only within 
 
 test('an account is frozen only by postings in its own branch', function () {
     branchCashReceipt($this, $this->cashA, '1000.0000');
-    $otherLedger = Account::factory()->create(['code' => '11104']);
+    $otherLedger = Account::factory()->create(['code' => '11104', 'financial_account_type' => 'cash']);
 
     $this->actingAs($this->admin)->put(route('financial-accounts.update', $this->cashA), branchCashForm($this, ['name' => 'Cash - Shahrah-e-Faisal', 'account_id' => $otherLedger->id]))
         ->assertSessionHasErrors('account_id');

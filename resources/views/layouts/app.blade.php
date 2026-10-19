@@ -23,6 +23,13 @@
             </div>
 
             <nav class="sidebar-nav">
+                @php
+                    $routeTransaction = request()->route('transaction');
+                    $activeTransactionType = request()->route('type')
+                        ?? ($routeTransaction instanceof \App\Models\OperationalTransaction ? $routeTransaction->type->value : null);
+                    $activeBookKind = request()->routeIs('reports.books', 'reports.books.export') ? request()->route('kind') : null;
+                    $activeRegisterKind = request()->routeIs('reports.registers', 'reports.registers.export') ? request()->route('kind') : null;
+                @endphp
                 <span class="sidebar-label">Workspace</span>
                 @can('dashboard.view')
                 <a href="{{ route('dashboard') }}" class="sidebar-link {{ request()->routeIs('dashboard') ? 'active' : '' }}">
@@ -66,25 +73,25 @@
                 @if(auth()->user()->canAny(['financial_accounts.view', 'receipts.view', 'payments.view', 'expenses.view', 'vendors.view', 'purchase_orders.view', 'purchase_bills.view', 'petty_cash.view', 'donations.view']))
                     <span class="sidebar-label">Operational Finance</span>
                     @can('financial_accounts.view')<a href="{{ route('financial-accounts.index') }}" class="sidebar-link {{ request()->routeIs('financial-accounts.*') ? 'active' : '' }}"><span class="sidebar-icon">CB</span><span class="sidebar-text">Cash & Bank</span></a>@endcan
-                    @can('receipts.view')<a href="{{ route('transactions.index','cash_receipt') }}" class="sidebar-link"><span class="sidebar-icon">CR</span><span class="sidebar-text">Cash Receipts</span></a><a href="{{ route('transactions.index','bank_receipt') }}" class="sidebar-link"><span class="sidebar-icon">BR</span><span class="sidebar-text">Bank Receipts</span></a>@endcan
-                    @can('payments.view')<a href="{{ route('transactions.index','cash_payment') }}" class="sidebar-link"><span class="sidebar-icon">CP</span><span class="sidebar-text">Cash Payments</span></a><a href="{{ route('transactions.index','bank_payment') }}" class="sidebar-link"><span class="sidebar-icon">BP</span><span class="sidebar-text">Bank Payments</span></a>@endcan
-                    @can('expenses.view')<a href="{{ route('transactions.index','expense') }}" class="sidebar-link"><span class="sidebar-icon">EX</span><span class="sidebar-text">Expenses</span></a>@endcan
+                    @can('receipts.view')<a href="{{ route('transactions.index','cash_receipt') }}" class="sidebar-link {{ $activeTransactionType === 'cash_receipt' ? 'active' : '' }}"><span class="sidebar-icon">CR</span><span class="sidebar-text">Cash Receipts</span></a><a href="{{ route('transactions.index','bank_receipt') }}" class="sidebar-link {{ $activeTransactionType === 'bank_receipt' ? 'active' : '' }}"><span class="sidebar-icon">BR</span><span class="sidebar-text">Bank Receipts</span></a>@endcan
+                    @can('payments.view')<a href="{{ route('transactions.index','cash_payment') }}" class="sidebar-link {{ $activeTransactionType === 'cash_payment' ? 'active' : '' }}"><span class="sidebar-icon">CP</span><span class="sidebar-text">Cash Payments</span></a><a href="{{ route('transactions.index','bank_payment') }}" class="sidebar-link {{ $activeTransactionType === 'bank_payment' ? 'active' : '' }}"><span class="sidebar-icon">BP</span><span class="sidebar-text">Bank Payments</span></a>@endcan
+                    @can('expenses.view')<a href="{{ route('transactions.index','expense') }}" class="sidebar-link {{ $activeTransactionType === 'expense' ? 'active' : '' }}"><span class="sidebar-icon">EX</span><span class="sidebar-text">Expenses</span></a>@endcan
                     @can('vendors.view')<a href="{{ route('vendors.index') }}" class="sidebar-link {{ request()->routeIs('vendors.*') ? 'active' : '' }}"><span class="sidebar-icon">V</span><span class="sidebar-text">Vendors</span></a>@endcan
                     @can('purchase_orders.view')<a href="{{ route('purchase-orders.index') }}" class="sidebar-link {{ request()->routeIs('purchase-orders.*') ? 'active' : '' }}"><span class="sidebar-icon">PO</span><span class="sidebar-text">Purchase Orders</span></a>@endcan
                     @can('purchase_bills.view')<a href="{{ route('purchase-bills.index') }}" class="sidebar-link {{ request()->routeIs('purchase-bills.*') ? 'active' : '' }}"><span class="sidebar-icon">PB</span><span class="sidebar-text">Purchase Bills</span></a>@endcan
-                    @can('vendor_payments.view')<a href="{{ route('transactions.index','vendor_payment') }}" class="sidebar-link"><span class="sidebar-icon">VP</span><span class="sidebar-text">Vendor Payments</span></a>@endcan
-                    @can('petty_cash.view')<a href="{{ route('transactions.index','petty_cash') }}" class="sidebar-link"><span class="sidebar-icon">PC</span><span class="sidebar-text">Petty Cash</span></a>@endcan
-                    @can('donations.view')<a href="{{ route('transactions.index','donation') }}" class="sidebar-link"><span class="sidebar-icon">DR</span><span class="sidebar-text">Donations</span></a>@endcan
-                    @can('donations.manage_categories')<a href="{{ route('donation-categories.index') }}" class="sidebar-link"><span class="sidebar-icon">DC</span><span class="sidebar-text">Donation Categories</span></a>@endcan
+                    @can('vendor_payments.view')<a href="{{ route('transactions.index','vendor_payment') }}" class="sidebar-link {{ $activeTransactionType === 'vendor_payment' ? 'active' : '' }}"><span class="sidebar-icon">VP</span><span class="sidebar-text">Vendor Payments</span></a>@endcan
+                    @can('petty_cash.view')<a href="{{ route('transactions.index','petty_cash') }}" class="sidebar-link {{ $activeTransactionType === 'petty_cash' ? 'active' : '' }}"><span class="sidebar-icon">PC</span><span class="sidebar-text">Petty Cash</span></a>@endcan
+                    @can('donations.view')<a href="{{ route('transactions.index','donation') }}" class="sidebar-link {{ $activeTransactionType === 'donation' ? 'active' : '' }}"><span class="sidebar-icon">DR</span><span class="sidebar-text">Donations</span></a>@endcan
+                    @can('donations.manage_categories')<a href="{{ route('donation-categories.index') }}" class="sidebar-link {{ request()->routeIs('donation-categories.*') ? 'active' : '' }}"><span class="sidebar-icon">DC</span><span class="sidebar-text">Donation Categories</span></a>@endcan
                 @endif
 
                 @foreach(['assets', 'inventory', 'budgets', 'payroll', 'statements', 'cashflow', 'ledger-exports', 'operational-reports', 'payroll-reports', 'frc-integration', 'fee-posting', 'bank-reconciliation', 'imprest', 'funds'] as $navModule) @include('layouts.partials.nav-'.$navModule) @endforeach
 
                 @if(auth()->user()->canAny(['cash_books.view', 'bank_books.view', 'finance_reports.view']))
                     <span class="sidebar-label">Finance Reports</span>
-                    @can('cash_books.view')<a href="{{ route('reports.books','cash') }}" class="sidebar-link"><span class="sidebar-icon">CB</span><span class="sidebar-text">Cash Book</span></a>@endcan
-                    @can('bank_books.view')<a href="{{ route('reports.books','bank') }}" class="sidebar-link"><span class="sidebar-icon">BB</span><span class="sidebar-text">Bank Book</span></a>@endcan
-                    @can('finance_reports.view')<a href="{{ route('reports.registers','receipts') }}" class="sidebar-link"><span class="sidebar-icon">RR</span><span class="sidebar-text">Receipt Register</span></a><a href="{{ route('reports.registers','payments') }}" class="sidebar-link"><span class="sidebar-icon">PR</span><span class="sidebar-text">Payment Register</span></a><a href="{{ route('reports.registers','expenses') }}" class="sidebar-link"><span class="sidebar-icon">ER</span><span class="sidebar-text">Expense Register</span></a><a href="{{ route('reports.registers','donations') }}" class="sidebar-link"><span class="sidebar-icon">DR</span><span class="sidebar-text">Donation Register</span></a><a href="{{ route('reports.payables') }}" class="sidebar-link"><span class="sidebar-icon">AP</span><span class="sidebar-text">Payables & Aging</span></a>@endcan
+                    @can('cash_books.view')<a href="{{ route('reports.books','cash') }}" class="sidebar-link {{ $activeBookKind === 'cash' ? 'active' : '' }}"><span class="sidebar-icon">CB</span><span class="sidebar-text">Cash Book</span></a>@endcan
+                    @can('bank_books.view')<a href="{{ route('reports.books','bank') }}" class="sidebar-link {{ $activeBookKind === 'bank' ? 'active' : '' }}"><span class="sidebar-icon">BB</span><span class="sidebar-text">Bank Book</span></a>@endcan
+                    @can('finance_reports.view')<a href="{{ route('reports.registers','receipts') }}" class="sidebar-link {{ $activeRegisterKind === 'receipts' ? 'active' : '' }}"><span class="sidebar-icon">RR</span><span class="sidebar-text">Receipt Register</span></a><a href="{{ route('reports.registers','payments') }}" class="sidebar-link {{ $activeRegisterKind === 'payments' ? 'active' : '' }}"><span class="sidebar-icon">PR</span><span class="sidebar-text">Payment Register</span></a><a href="{{ route('reports.registers','expenses') }}" class="sidebar-link {{ $activeRegisterKind === 'expenses' ? 'active' : '' }}"><span class="sidebar-icon">ER</span><span class="sidebar-text">Expense Register</span></a><a href="{{ route('reports.registers','donations') }}" class="sidebar-link {{ $activeRegisterKind === 'donations' ? 'active' : '' }}"><span class="sidebar-icon">DR</span><span class="sidebar-text">Donation Register</span></a><a href="{{ route('reports.payables') }}" class="sidebar-link {{ request()->routeIs('reports.payables', 'reports.payables.export') ? 'active' : '' }}"><span class="sidebar-icon">AP</span><span class="sidebar-text">Payables & Aging</span></a>@endcan
                 @endif
             </nav>
 
@@ -140,11 +147,13 @@
                 @if (session('error'))
                     <div class="alert alert-danger" role="alert">{{ session('error') }}</div>
                 @endif
-                @if ($errors->any())
+                {{-- A page lists in "inline-error-fields" the fields whose errors it already shows next to the form, so they are not repeated here. --}}
+                @php($summaryErrors = collect($errors->getMessages())->except(array_filter(array_map('trim', explode(',', trim($__env->yieldContent('inline-error-fields'))))))->flatten()->unique())
+                @if ($summaryErrors->isNotEmpty())
                     <div class="alert alert-danger" role="alert">
                         <strong>Please review the highlighted information.</strong>
                         <ul class="mb-0 mt-1">
-                            @foreach (collect($errors->all())->unique()->take(8) as $message)
+                            @foreach ($summaryErrors->take(8) as $message)
                                 <li>{{ $message }}</li>
                             @endforeach
                         </ul>

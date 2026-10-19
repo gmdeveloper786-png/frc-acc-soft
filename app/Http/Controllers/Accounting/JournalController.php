@@ -50,13 +50,16 @@ class JournalController extends Controller
         return redirect()->route('journals.show', $journal)->with('status', 'Journal draft created.');
     }
 
-    public function show(Request $request, JournalEntry $journal, BranchAccess $access): View
+    public function show(Request $request, JournalEntry $journal, BranchAccess $access, JournalReversalService $reversals, JournalWorkflowService $workflow, JournalPostingService $posting): View
     {
         abort_unless($access->canAccess($request->user(), $journal->branch), 403);
         $journal->load(['lines.account', 'lines.service', 'lines.fund', 'voucherType', 'fiscalYear', 'accountingPeriod', 'branch', 'creator', 'submitter', 'approver', 'poster', 'reversal', 'reversalOf']);
         $openPeriods = AccountingPeriod::query()->with('fiscalYear')->where('status', 'open')->orderBy('start_date')->get();
+        $reversal = $reversals->screenState($journal, $request->user());
+        $canApproveJournal = $workflow->canApprove($journal, $request->user());
+        $canPostJournal = $posting->canPost($journal, $request->user());
 
-        return view('accounting.journals.show', compact('journal', 'openPeriods'));
+        return view('accounting.journals.show', compact('journal', 'openPeriods', 'reversal', 'canApproveJournal', 'canPostJournal'));
     }
 
     public function edit(Request $request, JournalEntry $journal, BranchAccess $access): View
@@ -112,12 +115,45 @@ class JournalController extends Controller
         return back()->with('status', 'Journal posted successfully.');
     }
 
+    /** Request a reversal. Nothing is posted until a separate approver and poster act. */
     public function reverse(ReverseJournalRequest $request, JournalEntry $journal, JournalReversalService $reversal): RedirectResponse
     {
         $period = AccountingPeriod::query()->findOrFail($request->integer('accounting_period_id'));
-        $created = $reversal->reverseDirect($journal, $period, $request->string('transaction_date')->toString(), $request->string('reason')->toString(), $request->user());
+        $created = $reversal->request($journal, $period, $request->string('transaction_date')->toString(), $request->string('reason')->toString(), $request->user());
 
-        return redirect()->route('journals.show', $created)->with('status', 'Reversing journal posted successfully.');
+        return redirect()->route('journals.show', $created)->with('status', 'Reversal requested. It needs approval by another user and posting by a third user; the original journal stays posted until then.');
+    }
+
+    public function approveReversal(Request $request, JournalEntry $journal, JournalReversalService $reversal): RedirectResponse
+    {
+        $reversal->approve($journal, $request->user());
+
+        return back()->with('status', 'Reversal approved. Another user must now post it.');
+    }
+
+    public function postReversal(Request $request, JournalEntry $journal, JournalReversalService $reversal): RedirectResponse
+    {
+        $posted = $reversal->post($journal, $request->user());
+
+        return redirect()->route('journals.show', $posted)->with('status', 'Reversing journal posted; the original journal is now reversed.');
+    }
+
+    public function returnReversal(Request $request, JournalEntry $journal, JournalReversalService $reversal): RedirectResponse
+    {
+        $validated = $request->validate(['reason' => ['required', 'string', 'min:'.JournalReversalService::MIN_REASON_LENGTH, 'max:2000']]);
+        $originalId = $journal->reversal_of_id;
+        $reversal->returnRequest($journal, $validated['reason'], $request->user());
+
+        return redirect()->route('journals.show', $originalId)->with('status', 'Reversal request returned. The original journal stays posted.');
+    }
+
+    public function cancelReversal(Request $request, JournalEntry $journal, JournalReversalService $reversal): RedirectResponse
+    {
+        $validated = $request->validate(['reason' => ['required', 'string', 'min:'.JournalReversalService::MIN_REASON_LENGTH, 'max:2000']]);
+        $originalId = $journal->reversal_of_id;
+        $reversal->cancel($journal, $validated['reason'], $request->user());
+
+        return redirect()->route('journals.show', $originalId)->with('status', 'Reversal request cancelled. The original journal stays posted.');
     }
 
     private function formData(Request $request, BranchAccess $access): array

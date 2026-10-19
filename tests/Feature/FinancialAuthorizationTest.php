@@ -22,6 +22,7 @@ use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\DonationCategorySeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\VoucherTypeSeeder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Spatie\Permission\PermissionRegistrar;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -85,8 +86,10 @@ test('administrator and approver are denied approval of a payment above the thre
     $payment = submittedPayment($this, '150000.0001');
 
     expect($payment->approval_tier)->toBe('director')
-        ->and($this->administrator->can('payments.approve_high_value'))->toBeTrue()
-        ->and($service->canApprove($payment, $this->administrator))->toBeFalse()
+        ->and($this->administrator->can('payments.approve_high_value'))->toBeFalse();
+    // Even the permission granted directly is not Director authority.
+    $this->administrator->givePermissionTo('payments.approve_high_value');
+    expect($service->canApprove($payment, $this->administrator))->toBeFalse()
         ->and(fn () => $service->approve($payment, $this->administrator))->toThrow(HttpException::class)
         ->and(fn () => $service->approve($payment, $this->approver))->toThrow(HttpException::class);
 
@@ -175,25 +178,25 @@ test('administrator cannot escalate themselves or take over a director account',
     expect($this->administrator->fresh()->hasRole(SystemRole::Director->value))->toBeFalse();
 
     $originalPassword = $this->director->password;
-    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Director->value], ['password' => 'TakeoverPassword123!', 'password_confirmation' => 'TakeoverPassword123!']))->assertSessionHasErrors('email');
-    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Director->value], ['email' => 'attacker@example.test']))->assertSessionHasErrors('email');
-    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Approver->value], ['authority_reason' => 'Removing the director']))->assertSessionHasErrors('roles');
+    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Director->value], ['password' => 'TakeoverPassword123!', 'password_confirmation' => 'TakeoverPassword123!']))->assertForbidden();
+    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Director->value], ['email' => 'attacker@example.test']))->assertForbidden();
+    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Approver->value], ['authority_reason' => 'Removing the director']))->assertForbidden();
 
     expect($this->director->fresh()->password)->toBe($originalPassword)
         ->and($this->director->fresh()->email)->toBe($this->director->email)
         ->and($this->director->fresh()->hasRole(SystemRole::Director->value))->toBeTrue();
 });
 
-test('administrator keeps ordinary user administration including for a director', function () {
+test('administrator keeps ordinary user administration but cannot change a director account', function () {
     $target = financeUser(SystemRole::Cashier, $this->branch);
     $this->actingAs($this->administrator)->put(route('users.update', $target), userForm($target, [SystemRole::Accountant->value]))->assertRedirect()->assertSessionHasNoErrors();
-    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Director->value], ['name' => 'Renamed Director', 'is_active' => '0']))->assertRedirect()->assertSessionHasNoErrors();
+    $this->put(route('users.update', $this->director), userForm($this->director, [SystemRole::Director->value], ['name' => 'Renamed Director', 'is_active' => '0']))->assertForbidden();
     $this->put(route('users.update', $target), ['name' => $target->name, 'email' => $target->email, 'is_active' => '1', 'roles' => [SystemRole::Accountant->value]])->assertRedirect()->assertSessionHasNoErrors();
 
     expect($target->fresh()->hasRole(SystemRole::Accountant->value))->toBeTrue()
         ->and($target->fresh()->branches()->count())->toBe(0)
-        ->and($this->director->fresh()->name)->toBe('Renamed Director')
-        ->and($this->director->fresh()->is_active)->toBeFalse();
+        ->and($this->director->fresh()->name)->not->toBe('Renamed Director')
+        ->and($this->director->fresh()->is_active)->toBeTrue();
 });
 
 test('an existing director with the permission can appoint another director with a recorded reason', function () {
@@ -210,12 +213,13 @@ test('an existing director with the permission can appoint another director with
 
     Role::query()->where('name', SystemRole::Director->value)->first()->revokePermissionTo('approval_authority.assign');
     app(PermissionRegistrar::class)->forgetCachedPermissions();
-    $this->actingAs($this->director->fresh())->put(route('users.update', $target), userForm($target, [SystemRole::Approver->value], ['authority_reason' => 'No longer permitted to manage']))->assertSessionHasErrors('roles');
+    $this->actingAs($this->director->fresh())->put(route('users.update', $target), userForm($target, [SystemRole::Approver->value], ['authority_reason' => 'No longer permitted to manage']))->assertForbidden();
+    expect($target->fresh()->hasRole(SystemRole::Director->value))->toBeTrue();
 });
 
 test('console provisioning appoints and removes a director only with confirmation and a reason', function () {
     $target = financeUser(SystemRole::Approver, $this->branch);
-    $command = ['action' => 'grant', '--email' => $target->email, '--reason' => 'Owner letter dated 1 Jan appoints the Director'];
+    $command = ['action' => 'grant', '--email' => $target->email, '--reason' => 'Owner letter dated 1 Jan appoints the Director', '--database' => DB::connection()->getDatabaseName(), '--branch' => [$this->branch->id], '--authorized-by' => $this->director->email];
 
     $this->artisan('app:director-authority', $command)->expectsConfirmation("Grant Director approval authority for {$target->name} <{$target->email}>?", 'no')->assertFailed();
     expect($target->fresh()->hasRole(SystemRole::Director->value))->toBeFalse();

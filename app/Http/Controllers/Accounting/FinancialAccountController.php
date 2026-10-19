@@ -9,6 +9,7 @@ use App\Models\FinancialAccount;
 use App\Services\AccountingDecimal;
 use App\Services\AuditLogger;
 use App\Services\BranchAccess;
+use App\Services\FinancialAccountActivationGuard;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -42,7 +43,8 @@ class FinancialAccountController extends Controller
     {
         $data = $request->validated();
         $branch = $access->scope($request->user())->findOrFail($data['branch_id']);
-        $data['account_last_four'] = filled($data['account_number'] ?? null) ? substr(preg_replace('/\s+/', '', $data['account_number']), -4) : null;
+        $data['account_last_four'] = filled($data['account_number'] ?? null) ? substr(preg_replace('/[^A-Za-z0-9]/', '', $data['account_number']), -4) : null;
+        unset($data['keep_account_number']);
         $data['created_by'] = $request->user()->id;
         $account = FinancialAccount::query()->create($data);
         $audit->log('financial_accounts.created', $account, ['branch_id' => $branch->id, 'type' => $account->type]);
@@ -61,11 +63,12 @@ class FinancialAccountController extends Controller
     {
         abort_unless($access->canAccess($request->user(), $financialAccount->branch), 403);
         $data = $request->validated();
+        unset($data['keep_account_number']);
         $access->scope($request->user())->findOrFail($data['branch_id']);
         if (blank($data['account_number'] ?? null)) {
             unset($data['account_number']);
         } else {
-            $data['account_last_four'] = substr(preg_replace('/\s+/', '', $data['account_number']), -4);
+            $data['account_last_four'] = substr(preg_replace('/[^A-Za-z0-9]/', '', $data['account_number']), -4);
         }
         // Once money has moved through the account its ledger, branch and type are frozen:
         // relinking would rewrite history and take the old ledger out of the cash/bank controls.
@@ -80,9 +83,12 @@ class FinancialAccountController extends Controller
         return redirect()->route('financial-accounts.index')->with('status', 'Cash/bank account updated.');
     }
 
-    public function toggle(Request $request, FinancialAccount $financialAccount, BranchAccess $access, AuditLogger $audit): RedirectResponse
+    public function toggle(Request $request, FinancialAccount $financialAccount, BranchAccess $access, AuditLogger $audit, FinancialAccountActivationGuard $activationGuard): RedirectResponse
     {
         abort_unless($request->user()->can('financial_accounts.manage') && $access->canAccess($request->user(), $financialAccount->branch), 403);
+        if (! $financialAccount->is_active) {
+            $activationGuard->assertCanActivate($financialAccount);
+        }
         $financialAccount->update(['is_active' => ! $financialAccount->is_active]);
         $audit->log('financial_accounts.status_changed', $financialAccount, ['is_active' => $financialAccount->is_active]);
 
@@ -130,9 +136,22 @@ class FinancialAccountController extends Controller
 
     private function formData(Request $request, BranchAccess $access): array
     {
+        $ledgers = Account::query()
+            ->where('level', 'ledger')
+            ->where('account_type', 'asset')
+            ->where('normal_balance', 'debit')
+            ->where('financial_statement', 'balance_sheet')
+            ->whereIn('financial_account_type', ['cash', 'bank'])
+            ->where('is_postable', true)
+            ->where('is_active', true)
+            ->orderBy('code')
+            ->get();
+
         return [
             'branches' => $access->scope($request->user())->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
-            'ledgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->orderBy('code')->get(),
+            'ledgersByType' => collect(['cash', 'bank'])->mapWithKeys(fn (string $type): array => [
+                $type => $ledgers->filter(fn (Account $account): bool => $account->financial_account_type?->value === $type)->values(),
+            ]),
         ];
     }
 }

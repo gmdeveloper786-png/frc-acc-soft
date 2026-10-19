@@ -13,7 +13,7 @@ use Illuminate\Validation\ValidationException;
 
 class JournalWorkflowService
 {
-    public function __construct(private BranchAccess $branchAccess, private JournalValidationService $validator, private AuditLogger $audit, private ManualJournalGuard $manualGuard, private FundRestrictionPolicy $fundRules) {}
+    public function __construct(private BranchAccess $branchAccess, private JournalValidationService $validator, private AuditLogger $audit, private ManualJournalGuard $manualGuard, private FundRestrictionPolicy $fundRules, private ApprovalAuthorityService $authority) {}
 
     /** @param array<string,mixed> $data */
     public function create(array $data, User $actor): JournalEntry
@@ -39,6 +39,7 @@ class JournalWorkflowService
         return DB::transaction(function () use ($journal, $data, $actor): JournalEntry {
             $journal = JournalEntry::query()->lockForUpdate()->findOrFail($journal->id);
             abort_unless($this->branchAccess->canAccess($actor, $journal->branch), 403);
+            $this->assertNotReversalRequest($journal);
             if (! in_array($journal->status, [JournalStatus::Draft, JournalStatus::Rejected], true)) {
                 throw ValidationException::withMessages(['status' => 'Only draft or returned journals can be edited.']);
             }
@@ -60,6 +61,7 @@ class JournalWorkflowService
         return DB::transaction(function () use ($journal, $actor): JournalEntry {
             $journal = JournalEntry::query()->lockForUpdate()->findOrFail($journal->id);
             abort_unless($this->branchAccess->canAccess($actor, $journal->branch), 403);
+            $this->assertNotReversalRequest($journal);
             if ($journal->status !== JournalStatus::Draft) {
                 throw ValidationException::withMessages(['status' => 'Only a draft journal can be submitted.']);
             }
@@ -79,6 +81,7 @@ class JournalWorkflowService
         return DB::transaction(function () use ($journal, $actor): JournalEntry {
             $journal = JournalEntry::query()->lockForUpdate()->findOrFail($journal->id);
             abort_unless($this->branchAccess->canAccess($actor, $journal->branch), 403);
+            $this->assertNotReversalRequest($journal);
             if ($journal->status !== JournalStatus::Submitted) {
                 throw ValidationException::withMessages(['status' => 'Only a submitted journal can be approved.']);
             }
@@ -88,9 +91,16 @@ class JournalWorkflowService
             if (in_array($actor->id, $this->audit->actorIds($journal, ['journal.edited']), true)) {
                 throw ValidationException::withMessages(['approval' => 'You edited this journal, so another user must approve it.']);
             }
-            $this->validator->validate($journal);
+            // The tier comes from the validated debit total, never from a stored or submitted figure.
+            $totals = $this->validator->validate($journal);
+            $basis = $this->authority->journalApprovalBasis($actor, $journal->branch, $totals['total_debit']);
+            if ($basis === null) {
+                abort(403, $this->authority->exceedsJournalThreshold($totals['total_debit'])
+                    ? 'A journal above the approval threshold needs approval by a Director with authority for this branch.'
+                    : 'You are not authorized to approve this journal.');
+            }
             $journal->update(['status' => JournalStatus::Approved, 'approved_by' => $actor->id, 'approved_at' => now(), 'rejection_reason' => null]);
-            $this->audit->log('journal.approved', $journal);
+            $this->audit->log('journal.approved', $journal, ['amount' => $totals['total_debit'], 'approval_tier' => $basis === 'standard' ? 'standard' : 'director', 'authority_basis' => $basis]);
 
             return $journal;
         });
@@ -103,6 +113,7 @@ class JournalWorkflowService
         return DB::transaction(function () use ($journal, $actor, $reason): JournalEntry {
             $journal = JournalEntry::query()->lockForUpdate()->findOrFail($journal->id);
             abort_unless($this->branchAccess->canAccess($actor, $journal->branch), 403);
+            $this->assertNotReversalRequest($journal);
             if (! in_array($journal->status, [JournalStatus::Submitted, JournalStatus::Approved], true)) {
                 throw ValidationException::withMessages(['status' => 'This journal cannot be returned in its current state.']);
             }
@@ -134,6 +145,27 @@ class JournalWorkflowService
             $journal->lines()->delete();
             $journal->delete();
         });
+    }
+
+    /**
+     * Whether the user may approve this submitted manual journal now, for the
+     * journal screen. approve() checks everything again.
+     */
+    public function canApprove(JournalEntry $journal, User $actor): bool
+    {
+        return $journal->status === JournalStatus::Submitted
+            && $journal->source_type !== JournalReversalService::SOURCE_TYPE
+            && ! in_array($actor->id, [$journal->created_by, $journal->submitted_by], true)
+            && ! in_array($actor->id, $this->audit->actorIds($journal, ['journal.edited']), true)
+            && $this->authority->journalApprovalBasis($actor, $journal->branch, $journal->total_debit) !== null;
+    }
+
+    /** A reversal request moves only through the reversal workflow. */
+    private function assertNotReversalRequest(JournalEntry $journal): void
+    {
+        if ($journal->source_type === JournalReversalService::SOURCE_TYPE) {
+            throw ValidationException::withMessages(['status' => 'A reversing journal is approved, returned and posted only through the reversal workflow.']);
+        }
     }
 
     /** @param array<string,mixed> $data */

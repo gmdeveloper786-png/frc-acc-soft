@@ -32,6 +32,9 @@ beforeEach(function () {
     $this->maker->assignRole(SystemRole::Administrator->value);
     $this->checker = User::factory()->create();
     $this->checker->assignRole(SystemRole::Administrator->value);
+    // Three-person rule: a third user posts what the maker prepared and the checker approved.
+    $this->poster = User::factory()->create();
+    $this->poster->assignRole(SystemRole::Administrator->value);
     $this->year = FiscalYear::factory()->create([
         'name' => 'FY 2026', 'start_date' => '2026-01-01', 'end_date' => '2026-12-31',
         'status' => FiscalYearStatus::Open, 'is_current' => true,
@@ -86,12 +89,12 @@ function postJournalAt(object $test, string $date, string $amount): JournalEntry
     $test->actingAs($test->checker);
     $workflow->approve($journal->fresh(), $test->checker);
 
-    return app(JournalPostingService::class)->post($journal->fresh(), $test->checker);
+    return app(JournalPostingService::class)->post($journal->fresh(), $test->poster);
 }
 
 test('journal follows maker checker lifecycle and posts atomically', function () {
     $journal = approvedJournal($this);
-    $posted = app(JournalPostingService::class)->post($journal, $this->checker);
+    $posted = app(JournalPostingService::class)->post($journal, $this->poster);
 
     expect($posted->status)->toBe(JournalStatus::Posted)
         ->and($posted->voucher_number)->toBe('JV-2026-00001')
@@ -99,7 +102,7 @@ test('journal follows maker checker lifecycle and posts atomically', function ()
         ->and($posted->total_credit)->toBe('100.0000')
         ->and($posted->created_by)->toBe($this->maker->id)
         ->and($posted->approved_by)->toBe($this->checker->id)
-        ->and($posted->posted_by)->toBe($this->checker->id);
+        ->and($posted->posted_by)->toBe($this->poster->id);
 });
 
 test('unbalanced one line negative zero and dual sided journals are rejected', function (string $case) {
@@ -171,30 +174,30 @@ test('inactive service and draft fiscal year are rejected by the posting domain'
 
     $approved = approvedJournal($this);
     $this->year->update(['status' => FiscalYearStatus::Draft]);
-    expect(fn () => app(JournalPostingService::class)->post($approved, $this->checker))->toThrow(ValidationException::class);
+    expect(fn () => app(JournalPostingService::class)->post($approved, $this->poster))->toThrow(ValidationException::class);
 });
 
 test('closed period prevents posting and rolls back voucher allocation', function () {
     $journal = approvedJournal($this);
     $this->period->update(['status' => AccountingPeriodStatus::Closed]);
 
-    expect(fn () => app(JournalPostingService::class)->post($journal, $this->checker))->toThrow(ValidationException::class);
+    expect(fn () => app(JournalPostingService::class)->post($journal, $this->poster))->toThrow(ValidationException::class);
     expect($journal->fresh()->status)->toBe(JournalStatus::Approved)
         ->and($journal->fresh()->voucher_number)->toBeNull();
 });
 
 test('posted journal cannot be edited or posted twice and voucher numbers stay unique', function () {
-    $first = app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    $first = app(JournalPostingService::class)->post(approvedJournal($this), $this->poster);
     expect(fn () => app(JournalWorkflowService::class)->update($first, validJournalPayload($this), $this->maker))->toThrow(ValidationException::class);
-    expect(fn () => app(JournalPostingService::class)->post($first, $this->checker))->toThrow(ValidationException::class);
+    expect(fn () => app(JournalPostingService::class)->post($first, $this->poster))->toThrow(ValidationException::class);
 
-    $second = app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    $second = app(JournalPostingService::class)->post(approvedJournal($this), $this->poster);
     expect($second->voucher_number)->toBe('JV-2026-00002')
         ->and(JournalEntry::query()->distinct()->count('voucher_number'))->toBe(2);
 });
 
 test('posted journal header and lines are immutable even through direct model writes', function () {
-    $posted = app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    $posted = app(JournalPostingService::class)->post(approvedJournal($this), $this->poster);
 
     expect(fn () => $posted->update(['narration' => 'Silent mutation']))->toThrow(LogicException::class)
         ->and(fn () => $posted->lines->first()->update(['debit' => '99.0000']))->toThrow(LogicException::class)
@@ -202,7 +205,7 @@ test('posted journal header and lines are immutable even through direct model wr
 });
 
 test('reversal preserves original and both entries offset in reports', function () {
-    $original = app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    $original = app(JournalPostingService::class)->post(approvedJournal($this), $this->poster);
     $reversal = app(JournalReversalService::class)->reverse($original, $this->period, '2026-01-20', 'Entry recorded in error', $this->checker);
 
     expect($original->fresh()->status)->toBe(JournalStatus::Reversed)
@@ -259,7 +262,7 @@ test('trial balance rolls ledger balances into parents without double counting',
 });
 
 test('voucher configuration changes are audited and posted numbering rules are protected', function () {
-    app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    app(JournalPostingService::class)->post(approvedJournal($this), $this->poster);
     $this->actingAs($this->checker);
     $service = app(VoucherTypeService::class);
     $data = [
@@ -285,13 +288,14 @@ test('branch scoping rejects cross branch journal access', function () {
 });
 
 test('approved opening balance posts once through journal engine', function () {
+    $openingCredit = Account::factory()->create(['code' => '311001', 'account_type' => 'equity', 'normal_balance' => 'credit']);
     $batch = OpeningBalanceBatch::factory()->create([
         'fiscal_year_id' => $this->year->id, 'branch_id' => $this->branch->id, 'created_by' => $this->maker->id,
         'total_debit' => '75.00', 'total_credit' => '75.00', 'difference' => '0.00',
     ]);
     $batch->lines()->createMany([
         ['account_id' => $this->debitAccount->id, 'debit' => '75.00', 'credit' => '0'],
-        ['account_id' => $this->creditAccount->id, 'debit' => '0', 'credit' => '75.00'],
+        ['account_id' => $openingCredit->id, 'debit' => '0', 'credit' => '75.00'],
     ]);
     $this->actingAs($this->checker);
     $service = app(OpeningBalancePostingService::class);
@@ -301,6 +305,25 @@ test('approved opening balance posts once through journal engine', function () {
     expect($posted->status)->toBe('posted')->and($posted->journal_entry_id)->not->toBeNull()
         ->and($posted->journalEntry->status)->toBe(JournalStatus::Posted);
     expect(fn () => $service->post($posted, $this->checker))->toThrow(ValidationException::class);
+});
+
+test('opening balance source cannot bypass balance sheet account restrictions', function () {
+    $journal = app(JournalWorkflowService::class)->create([
+        ...validJournalPayload($this),
+        'transaction_date' => '2026-01-01',
+    ], $this->maker);
+    $journal->forceFill([
+        'source_system' => 'accounting',
+        'source_type' => 'opening_balance',
+        'source_key' => 'opening_balance:forged-test',
+        'status' => JournalStatus::Approved,
+        'submitted_by' => $this->maker->id,
+        'approved_by' => $this->checker->id,
+    ])->save();
+
+    expect(fn () => app(JournalPostingService::class)->postSystem($journal->fresh(), $this->checker))
+        ->toThrow(ValidationException::class)
+        ->and($journal->fresh()->voucher_number)->toBeNull();
 });
 
 test('unauthorized journal routes are rejected server side', function () {
@@ -322,7 +345,7 @@ test('a draft journal can be discarded with a reason but a posted one cannot', f
     expect(JournalEntry::query()->whereKey($draft->id)->exists())->toBeFalse()
         ->and(AuditLog::query()->where('event', 'journal.discarded')->where('auditable_id', $draft->id)->value('properties')['reason'])->toBe('Entered twice by mistake');
 
-    $posted = app(JournalPostingService::class)->post(approvedJournal($this), $this->checker);
+    $posted = app(JournalPostingService::class)->post(approvedJournal($this), $this->poster);
     $this->actingAs($this->maker)->delete(route('journals.destroy', $posted), ['reason' => 'Trying to remove history'])->assertSessionHasErrors('status');
     expect(JournalEntry::query()->whereKey($posted->id)->exists())->toBeTrue();
 

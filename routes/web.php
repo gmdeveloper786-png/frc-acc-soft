@@ -60,14 +60,14 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/users', [UserController::class, 'store'])->middleware(['permission:users.create', 'permission:users.assign_roles', 'permission:branches.assign_users'])->name('users.store');
     Route::get('/users/{user}', [UserController::class, 'show'])->middleware('permission:users.view')->name('users.show');
     Route::get('/users/{user}/edit', [UserController::class, 'edit'])->middleware(['permission:users.update', 'permission:users.assign_roles', 'permission:branches.assign_users'])->name('users.edit');
-    Route::put('/users/{user}', [UserController::class, 'update'])->middleware(['permission:users.update', 'permission:users.assign_roles', 'permission:branches.assign_users'])->name('users.update');
+    Route::match(['put', 'patch'], '/users/{user}', [UserController::class, 'update'])->middleware(['permission:users.update', 'permission:users.assign_roles', 'permission:branches.assign_users'])->name('users.update');
 
     Route::get('/roles', [RoleController::class, 'index'])->middleware('permission:roles.view')->name('roles.index');
     Route::get('/roles/create', [RoleController::class, 'create'])->middleware(['permission:roles.create', 'permission:roles.assign_permissions'])->name('roles.create');
     Route::post('/roles', [RoleController::class, 'store'])->middleware(['permission:roles.create', 'permission:roles.assign_permissions'])->name('roles.store');
     Route::get('/roles/{role}', [RoleController::class, 'show'])->middleware('permission:roles.view')->name('roles.show');
     Route::get('/roles/{role}/edit', [RoleController::class, 'edit'])->middleware(['permission:roles.update', 'permission:roles.assign_permissions'])->name('roles.edit');
-    Route::put('/roles/{role}', [RoleController::class, 'update'])->middleware(['permission:roles.update', 'permission:roles.assign_permissions'])->name('roles.update');
+    Route::match(['put', 'patch'], '/roles/{role}', [RoleController::class, 'update'])->middleware(['permission:roles.update', 'permission:roles.assign_permissions'])->name('roles.update');
 
     Route::get('/branches', [BranchController::class, 'index'])->middleware('permission:branches.view')->name('branches.index');
     Route::post('/branches/sync', [BranchController::class, 'sync'])->middleware(['permission:branches.sync', 'throttle:3,1'])->name('branches.sync');
@@ -147,6 +147,10 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/journals/{journal}/reject', [JournalController::class, 'reject'])->middleware('permission:journals.reject')->name('journals.reject');
     Route::post('/journals/{journal}/post', [JournalController::class, 'post'])->middleware('permission:journals.post')->name('journals.post');
     Route::post('/journals/{journal}/reverse', [JournalController::class, 'reverse'])->middleware('permission:journals.reverse')->name('journals.reverse');
+    Route::post('/journals/{journal}/reversal/approve', [JournalController::class, 'approveReversal'])->middleware('permission:journals.approve')->name('journals.reversal.approve');
+    Route::post('/journals/{journal}/reversal/post', [JournalController::class, 'postReversal'])->middleware('permission:journals.post')->name('journals.reversal.post');
+    Route::post('/journals/{journal}/reversal/return', [JournalController::class, 'returnReversal'])->middleware('permission:journals.approve|journals.post')->name('journals.reversal.return');
+    Route::post('/journals/{journal}/reversal/cancel', [JournalController::class, 'cancelReversal'])->middleware('permission:journals.reverse')->name('journals.reversal.cancel');
 
     Route::get('/reports/general-ledger', GeneralLedgerController::class)->middleware('permission:ledgers.view')->name('reports.general-ledger');
     Route::get('/reports/trial-balance', TrialBalanceController::class)->middleware('permission:trial_balance.view')->name('reports.trial-balance');

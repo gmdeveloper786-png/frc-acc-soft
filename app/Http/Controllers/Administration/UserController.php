@@ -19,6 +19,8 @@ use Illuminate\View\View;
 
 class UserController extends Controller
 {
+    private const DIRECTOR_ACCOUNT_LOCKED = 'A Director account can only be changed by an authorized Director.';
+
     /**
      * Display a listing of the resource.
      */
@@ -38,11 +40,12 @@ class UserController extends Controller
     /**
      * Show the form for creating a new resource.
      */
-    public function create(Request $request, BranchAccess $access): View
+    public function create(Request $request, BranchAccess $access, ApprovalAuthorityService $authority): View
     {
         return view('administration.users.create', [
             'roles' => Role::query()->orderBy('name')->get(),
             'branches' => $access->scope($request->user())->orderBy('name')->get(),
+            'canManageDirector' => $authority->mayManageDirectorRole($request->user()),
         ]);
     }
 
@@ -86,15 +89,17 @@ class UserController extends Controller
     /**
      * Show the form for editing the specified resource.
      */
-    public function edit(Request $request, User $user, BranchAccess $access, AdministratorGuard $guard): View
+    public function edit(Request $request, User $user, BranchAccess $access, AdministratorGuard $guard, ApprovalAuthorityService $authority): View
     {
         abort_unless($access->canManageUser($request->user(), $user), 403);
         abort_unless($guard->mayManage($request->user(), $user), 403);
+        abort_unless($authority->mayEditAccount($request->user(), $user), 403, self::DIRECTOR_ACCOUNT_LOCKED);
         $user->load(['roles', 'branches']);
 
         return view('administration.users.edit', [
             'user' => $user, 'roles' => Role::query()->orderBy('name')->get(),
             'branches' => $access->scope($request->user())->orderBy('name')->get(),
+            'canManageDirector' => $authority->mayManageDirectorRole($request->user()) && ! $request->user()->is($user),
         ]);
     }
 
@@ -104,8 +109,9 @@ class UserController extends Controller
     public function update(Request $request, User $user, BranchAccess $access, AdministratorGuard $guard, AuditLogger $audit, ApprovalAuthorityService $authority): RedirectResponse
     {
         abort_unless($access->canManageUser($request->user(), $user), 403);
+        abort_unless($authority->mayEditAccount($request->user(), $user), 403, self::DIRECTOR_ACCOUNT_LOCKED);
         $data = $this->validated($request, $user);
-        if ($request->user()->is($user) && ($data['roles'] !== $user->roles->pluck('name')->all() || $data['branches'] !== $user->branches->pluck('id')->map(fn ($id) => (string) $id)->all() || ! $data['is_active'])) {
+        if ($request->user()->is($user) && (collect($data['roles'])->sort()->values()->all() !== $user->roles->pluck('name')->sort()->values()->all() || $data['branches'] !== $user->branches->pluck('id')->map(fn ($id) => (string) $id)->all() || ! $data['is_active'])) {
             return back()->withErrors(['roles' => 'You cannot change your own roles, branches, or active status.'])->withInput();
         }
         $this->ensureAssignable($request, $data['roles'], $data['branches'], $access);

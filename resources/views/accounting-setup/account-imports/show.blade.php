@@ -1,4 +1,4 @@
-@extends('layouts.app') @section('title','COA Approval Review') @section('eyebrow','Chart of Accounts') @section('page-title','COA Approval Review')
+@extends('layouts.app') @section('title','COA Approval Review') @section('eyebrow','Chart of Accounts') @section('page-title','COA Approval Review') @section('inline-error-fields','rows,notes')
 @section('page-description',$accountImport->original_filename.' — reviewing and approving rows creates no account and no financial posting.')
 @section('page-actions')<div class="d-flex gap-2"><a class="btn btn-outline-primary" href="{{ route('account-imports.export',$accountImport) }}">Export approval summary (CSV)</a><a class="btn btn-outline-primary" href="{{ route('account-imports.create') }}">Back</a></div>@endsection
 @section('content')
@@ -33,8 +33,8 @@
 <form method="POST" action="{{ route('account-imports.decide',$accountImport) }}" class="surface-card mb-4" data-submit-once>@csrf
     <div class="card-heading"><div><span class="section-kicker">Explicit decision required</span><h2>Source accounts</h2></div><span class="status-badge neutral">{{ $rows->total() }} rows</span></div>
     <div class="alert alert-warning mt-3">The proposed decision is only a suggestion. Nothing is approved until an authorized reviewer records a decision, and nothing is imported until the approved rows are imported below. A school-labelled account is never excluded by its name alone: School Readiness Program is a normal FRC service.</div>
-    @error('rows')<div class="alert alert-danger">{{ $message }}</div>@enderror
-    @error('notes')<div class="alert alert-danger">{{ $message }}</div>@enderror
+    @error('rows')<div class="alert alert-danger" role="alert">{{ $message }}</div>@enderror
+    @error('notes')<div class="alert alert-danger" role="alert">{{ $message }}</div>@enderror
     <div class="table-responsive"><table class="table accounting-table"><thead><tr><th><input class="form-check-input" type="checkbox" data-check-all="[data-review-row]" aria-label="Select all rows on this page" @disabled($confirmed)></th><th>Code / Name</th><th>Hierarchy</th><th>Normal balance</th><th>Posting</th><th>Classification</th><th>Proposed decision</th><th>Reason / notes</th><th>Approval status</th></tr></thead><tbody>
     @forelse($rows as $row)
         <tr>

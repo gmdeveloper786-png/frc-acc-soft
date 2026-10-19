@@ -36,6 +36,8 @@ beforeEach(function () {
     $this->maker->assignRole(SystemRole::Administrator->value);
     $this->checker = User::factory()->create();
     $this->checker->assignRole(SystemRole::Administrator->value);
+    $this->poster = User::factory()->create();
+    $this->poster->assignRole(SystemRole::Administrator->value);
     $this->year = FiscalYear::factory()->create(['start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     $this->period = AccountingPeriod::factory()->create(['fiscal_year_id' => $this->year, 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
     $this->branch = Branch::factory()->create(['status' => 'publish']);
@@ -77,7 +79,7 @@ function postReplenishment(object $test, ImprestReplenishment $replenishment): v
     $journal = $replenishment->journalEntry;
     app(JournalWorkflowService::class)->submit($journal, $test->maker);
     app(JournalWorkflowService::class)->approve($journal->fresh(), $test->checker);
-    app(JournalPostingService::class)->post($journal->fresh(), $test->checker);
+    app(JournalPostingService::class)->post($journal->fresh(), $test->poster);
 }
 
 test('float setup requires a petty cash or cash ledger and a bank or cash source of the same branch', function () {
@@ -173,9 +175,9 @@ test('replenishment prepares a draft CV journal that follows maker checker and r
     // Maker-checker: the preparer can submit but not approve; posting needs approval first.
     app(JournalWorkflowService::class)->submit($journal, $this->maker);
     expect(fn () => app(JournalWorkflowService::class)->approve($journal->fresh(), $this->maker))->toThrow(ValidationException::class)
-        ->and(fn () => app(JournalPostingService::class)->post($journal->fresh(), $this->checker))->toThrow(ValidationException::class);
+        ->and(fn () => app(JournalPostingService::class)->post($journal->fresh(), $this->poster))->toThrow(ValidationException::class);
     app(JournalWorkflowService::class)->approve($journal->fresh(), $this->checker);
-    app(JournalPostingService::class)->post($journal->fresh(), $this->checker);
+    app(JournalPostingService::class)->post($journal->fresh(), $this->poster);
 
     $summary = app(ImprestLedgerService::class)->summary($float->fresh());
     expect($summary['balance'])->toBe('5000.0000')

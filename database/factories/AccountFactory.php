@@ -25,6 +25,7 @@ class AccountFactory extends Factory
             'code' => $this->faker->unique()->numerify('######'), 'name' => $this->faker->words(3, true),
             'account_type' => AccountType::Asset, 'level' => AccountLevel::Ledger,
             'normal_balance' => NormalBalance::Debit, 'financial_statement' => FinancialStatement::BalanceSheet,
+            'financial_account_type' => null,
             'is_postable' => true, 'is_active' => true, 'sort_order' => 0,
         ];
     }

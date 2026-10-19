@@ -25,6 +25,7 @@ use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\DonationCategorySeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\VoucherTypeSeeder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
 
@@ -76,7 +77,9 @@ function thresholdValue(string $key): string
 
 test('administrator cannot change approval thresholds through any endpoint', function () {
     $this->actingAs($this->administrator);
-    expect($this->administrator->can('approval_settings.manage'))->toBeTrue()->and($this->administrator->can('settings.update'))->toBeTrue();
+    // The Administrator role no longer carries the Director-only permission; even granted directly it changes nothing.
+    expect($this->administrator->can('approval_settings.manage'))->toBeFalse()->and($this->administrator->can('settings.update'))->toBeTrue();
+    $this->administrator->givePermissionTo('approval_settings.manage');
 
     $this->put(route('approval-settings.update'), approvalControls(['approval__payment_threshold' => '99999999.00', 'approval__purchase_order_threshold' => '99999999.00']))->assertForbidden();
     $this->get(route('approval-settings.edit'))->assertForbidden();
@@ -212,7 +215,7 @@ test('one account cannot hold administrator and director roles together', functi
 
     $this->actingAs($this->director)->put(route('users.update', $target), $form($target, [SystemRole::Administrator->value, SystemRole::Director->value]))->assertSessionHasErrors('roles');
     $this->put(route('users.update', $this->administrator), $form($this->administrator, [SystemRole::Administrator->value, SystemRole::Director->value]))->assertSessionHasErrors('roles');
-    $this->artisan('app:director-authority', ['action' => 'grant', '--email' => $this->administrator->email, '--reason' => 'Owner letter appoints the administrator'])
+    $this->artisan('app:director-authority', ['action' => 'grant', '--email' => $this->administrator->email, '--reason' => 'Owner letter appoints the administrator', '--database' => DB::connection()->getDatabaseName(), '--branch' => [$this->branch->id], '--authorized-by' => $this->director->email])
         ->expectsConfirmation("Grant Director approval authority for {$this->administrator->name} <{$this->administrator->email}>?", 'yes')->assertFailed();
     expect($this->administrator->fresh()->hasRole(SystemRole::Director->value))->toBeFalse()
         ->and($target->fresh()->hasRole(SystemRole::Director->value))->toBeFalse();
@@ -230,7 +233,8 @@ test('administrator cannot alter the director role and role edits cannot grant a
 
     $this->actingAs($this->administrator)->get(route('roles.edit', $directorRole))->assertForbidden();
     $this->put(route('roles.update', $directorRole), ['name' => 'Director', 'permissions_submitted' => '1', 'permissions' => ['dashboard.view']])->assertForbidden();
-    $this->post(route('roles.store'), ['name' => 'Shadow Director', 'approval_authority' => 'director', 'permissions' => ['purchase_orders.approve_high_value', 'payments.approve_high_value', 'approval_settings.manage']])->assertRedirect();
+    $this->post(route('roles.store'), ['name' => 'Shadow Director', 'approval_authority' => 'director', 'permissions' => ['purchase_orders.approve_high_value', 'payments.approve_high_value', 'approval_settings.manage']])->assertSessionHasErrors('permissions');
+    $this->post(route('roles.store'), ['name' => 'Shadow Director', 'approval_authority' => 'director', 'permissions' => ['purchase_orders.approve']])->assertRedirect()->assertSessionHasNoErrors();
 
     expect($directorRole->fresh()->permissions()->pluck('name')->sort()->values()->all())->toBe($before)
         ->and(Role::query()->where('name', 'Shadow Director')->value('approval_authority'))->toBeNull()
@@ -265,8 +269,9 @@ test('a bill above its purchase order is approved only with director authority',
     expect($bills->approve($within->fresh(), $this->administrator)->status)->toBe(PurchaseBillStatus::Approved);
 
     $over = $bills->submit($bills->create($payload('INV-X-1', '9.0000', ['po_exception_reason' => 'Vendor delivered three extra units accepted by the branch']), $this->maker), $this->maker);
-    expect($this->administrator->can('purchase_bills.approve_po_exception'))->toBeTrue()
-        ->and(fn () => $bills->approve($over->fresh(), $this->administrator))->toThrow(HttpException::class)
+    expect($this->administrator->can('purchase_bills.approve_po_exception'))->toBeFalse();
+    $this->administrator->givePermissionTo('purchase_bills.approve_po_exception');
+    expect(fn () => $bills->approve($over->fresh(), $this->administrator))->toThrow(HttpException::class)
         ->and(fn () => $bills->approve($over->fresh(), $this->approver))->toThrow(HttpException::class)
         ->and($over->fresh()->status)->toBe(PurchaseBillStatus::Submitted)
         ->and(AuditLog::query()->where('event', 'purchase_bills.po_exception_denied')->exists())->toBeTrue();

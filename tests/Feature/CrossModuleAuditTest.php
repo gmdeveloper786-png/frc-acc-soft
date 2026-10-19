@@ -35,6 +35,7 @@ use App\Models\VoucherType;
 use App\Services\DocumentNumberService;
 use App\Services\Inventory\InventoryService;
 use App\Services\JournalPostingService;
+use App\Services\JournalReversalService;
 use App\Services\JournalWorkflowService;
 use App\Services\OpeningBalancePostingService;
 use App\Services\OpeningBalanceService;
@@ -57,6 +58,8 @@ beforeEach(function () {
     $this->maker->assignRole(SystemRole::Administrator->value);
     $this->checker = User::factory()->create();
     $this->checker->assignRole(SystemRole::Administrator->value);
+    $this->poster = User::factory()->create();
+    $this->poster->assignRole(SystemRole::Administrator->value);
     $this->year = FiscalYear::factory()->create(['start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     $this->period = AccountingPeriod::factory()->create(['fiscal_year_id' => $this->year, 'name' => 'January 2026', 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
     $this->branch = Branch::factory()->create(['status' => 'publish']);
@@ -165,16 +168,28 @@ test('a reversing journal cannot itself be reversed from the journal screen', fu
     expect($reversal->fresh()->status)->toBe(JournalStatus::Posted);
 });
 
-test('a manual journal is still reversed from the journal screen', function () {
+test('a manual journal is still reversed from the journal screen through request approval and posting', function () {
     $workflow = app(JournalWorkflowService::class);
     $journal = $workflow->create(audit8JournalPayload($this, $this->branch), $this->maker);
     $workflow->submit($journal, $this->maker);
     $workflow->approve($journal->fresh(), $this->checker);
-    app(JournalPostingService::class)->post($journal->fresh(), $this->checker);
+    app(JournalPostingService::class)->post($journal->fresh(), $this->poster);
 
-    $this->post(route('journals.reverse', $journal), audit8ReversalForm($this))->assertSessionHasNoErrors();
+    $this->post(route('journals.reverse', $journal), [...audit8ReversalForm($this), 'reason' => 'Audit reversal of a manual journal'])->assertSessionHasNoErrors();
+    $request = JournalEntry::query()->where('reversal_of_id', $journal->id)->sole();
+    expect($journal->fresh()->status)->toBe(JournalStatus::Posted)->and($request->status)->toBe(JournalStatus::Submitted);
 
-    expect($journal->fresh()->status)->toBe(JournalStatus::Reversed);
+    $approver = User::factory()->create();
+    $approver->assignRole(SystemRole::Approver->value);
+    $approver->branches()->attach($this->branch);
+    $poster = User::factory()->create();
+    $poster->assignRole(SystemRole::Accountant->value);
+    $poster->branches()->attach($this->branch);
+    $reversals = app(JournalReversalService::class);
+    $reversals->approve($request, $approver);
+    $reversals->post($request->fresh(), $poster);
+
+    expect($journal->fresh()->status)->toBe(JournalStatus::Reversed)->and($request->fresh()->status)->toBe(JournalStatus::Posted);
 });
 
 // --- Vendor payments and purchase bills ---------------------------------------

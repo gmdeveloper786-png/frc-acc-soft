@@ -12,7 +12,10 @@ use Illuminate\Validation\ValidationException;
 
 class JournalValidationService
 {
-    public function __construct(private FundRestrictionPolicy $fundRules) {}
+    public function __construct(
+        private FundRestrictionPolicy $fundRules,
+        private OpeningBalanceValidationService $openingBalances,
+    ) {}
 
     /** @return array{total_debit:string,total_credit:string} */
     public function validate(JournalEntry $journal): array
@@ -87,6 +90,8 @@ class JournalValidationService
         if ($journal->accountingPeriod->status !== AccountingPeriodStatus::Open) {
             $errors['accounting_period_id'] = 'The accounting period is not open for posting.';
         }
+
+        $errors = [...$errors, ...$this->openingBalances->journalErrors($journal)];
 
         if ($errors !== []) {
             throw ValidationException::withMessages($errors);

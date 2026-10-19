@@ -112,4 +112,20 @@ class JournalEntry extends Model
     {
         return $this->hasOne(self::class, 'reversal_of_id');
     }
+
+    /**
+     * Short label for lists: the voucher number once posted (kept after a
+     * reversal), otherwise the status and id. A voucher number exists only
+     * after posting, so none is ever shown for an unposted journal.
+     */
+    public function displayLabel(): string
+    {
+        return $this->voucher_number ?: $this->status->label().' #'.$this->id;
+    }
+
+    /** Page heading: the voucher number once posted, otherwise e.g. "Submitted Journal #2". */
+    public function displayTitle(): string
+    {
+        return $this->voucher_number ?: $this->status->label().' Journal #'.$this->id;
+    }
 }

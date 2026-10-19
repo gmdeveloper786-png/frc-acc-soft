@@ -31,6 +31,11 @@ test('hierarchy level and posting flags are validated', function () {
     $this->actingAs($this->admin)->post(route('accounts.store'), validClassAccount(['code' => '110000', 'name' => 'Current Assets', 'level' => 'group', 'parent_id' => $parent->id, 'is_postable' => '1']))->assertSessionHasErrors('is_postable');
 });
 
+test('cash and bank eligibility can only be assigned to a valid posting ledger', function () {
+    $this->actingAs($this->admin)->post(route('accounts.store'), validClassAccount(['financial_account_type' => 'cash']))
+        ->assertSessionHasErrors('financial_account_type');
+});
+
 test('self parent and circular hierarchy are rejected', function () {
     $account = Account::factory()->create(['code' => '100000', 'level' => 'class', 'is_postable' => false]);
     $this->actingAs($this->admin)->put(route('accounts.update', $account), validClassAccount(['parent_id' => $account->id]))->assertSessionHasErrors('parent_id');

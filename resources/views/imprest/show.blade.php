@@ -84,7 +84,7 @@
                 <td>{{ count($replenishment->covered_voucher_ids ?? []) }}@if($replenishment->covered_from) <span class="table-subtext">{{ $replenishment->covered_from->format('d M Y') }} – {{ $replenishment->covered_to->format('d M Y') }}</span>@endif</td>
                 <td class="text-end font-monospace">{{ number_format((float) $replenishment->amount, 2) }}</td>
                 <td><span class="status-badge {{ $replenishment->status === 'posted' ? 'success' : ($replenishment->isOpen() ? 'pending' : 'neutral') }}">{{ ucfirst($replenishment->status) }}</span></td>
-                <td>@if($replenishment->journalEntry)@can('journals.view')<a href="{{ route('journals.show', $replenishment->journalEntry) }}">{{ $replenishment->journalEntry->voucher_number ?? 'Draft #'.$replenishment->journal_entry_id }}</a>@else{{ $replenishment->journalEntry->voucher_number ?? 'Draft' }}@endcan @else — @endif</td>
+                <td>@if($replenishment->journalEntry)@can('journals.view')<a href="{{ route('journals.show', $replenishment->journalEntry) }}">{{ $replenishment->journalEntry->displayLabel() }}</a>@else{{ $replenishment->journalEntry->displayLabel() }}@endcan @else — @endif</td>
             </tr>
         @empty
             <tr><td colspan="7" class="text-center py-4">No replenishments yet.</td></tr>

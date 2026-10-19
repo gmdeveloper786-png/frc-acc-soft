@@ -294,7 +294,7 @@ test('reversing a closing journal restores the branch balances and allows a new 
     yecMapSurplus($this);
     [$alpha] = app(YearEndClosingService::class)->post($this->year, $this->admin, 'Annual closing for FY 2026');
 
-    app(JournalReversalService::class)->reverseDirect($alpha, $this->december, '2026-12-31', 'Closing posted too early', $this->admin);
+    app(JournalReversalService::class)->reverse($alpha, $this->december, '2026-12-31', 'Closing posted too early', $this->admin);
 
     $balances = app(YearEndClosingService::class)->balances($this->year);
     expect(array_keys($balances))->toBe([$this->branchA->id])
@@ -351,7 +351,7 @@ test('performance reports keep the closed year income and expenditure after clos
         ->and($before['dashboard'])->toBe(['income' => '1200.0000', 'expense' => '800.0000', 'surplus' => '400.0000'])
         ->and($snapshot())->toBe($before);
 
-    app(JournalReversalService::class)->reverseDirect($alpha, $this->december, '2026-12-31', 'Closing posted too early', $this->admin);
+    app(JournalReversalService::class)->reverse($alpha, $this->december, '2026-12-31', 'Closing posted too early', $this->admin);
     expect($snapshot())->toBe($before);
 });
 

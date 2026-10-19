@@ -4,6 +4,7 @@ namespace App\Http\Requests;
 
 use App\Enums\AccountLevel;
 use App\Enums\AccountType;
+use App\Enums\FinancialAccountType;
 use App\Enums\FinancialStatement;
 use App\Enums\NormalBalance;
 use Illuminate\Contracts\Validation\ValidationRule;
@@ -40,6 +41,7 @@ class StoreAccountRequest extends FormRequest
             'level' => ['required', Rule::enum(AccountLevel::class)],
             'normal_balance' => ['required', Rule::enum(NormalBalance::class)],
             'financial_statement' => ['required', Rule::enum(FinancialStatement::class)],
+            'financial_account_type' => ['nullable', Rule::enum(FinancialAccountType::class)],
             'is_postable' => ['required', 'boolean'],
             'is_active' => ['required', 'boolean'],
             'description' => ['nullable', 'string', 'max:2000'],

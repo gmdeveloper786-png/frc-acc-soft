@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Enums\AccountLevel;
 use App\Enums\AccountType;
+use App\Enums\FinancialStatement;
+use App\Enums\NormalBalance;
 use App\Models\Account;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -64,6 +66,16 @@ class AccountService
         if (($data['is_postable'] ?? false) && $level !== AccountLevel::Ledger) {
             throw ValidationException::withMessages(['is_postable' => 'Only ledger accounts may allow posting.']);
         }
+        if (filled($data['financial_account_type'] ?? null)
+            && ($level !== AccountLevel::Ledger
+                || $type !== AccountType::Asset
+                || NormalBalance::from((string) $data['normal_balance']) !== NormalBalance::Debit
+                || FinancialStatement::from((string) $data['financial_statement']) !== FinancialStatement::BalanceSheet
+                || ! ($data['is_postable'] ?? false))) {
+            throw ValidationException::withMessages([
+                'financial_account_type' => 'Cash and bank eligibility is only valid for posting-enabled Asset ledgers with a debit normal balance on the Balance Sheet.',
+            ]);
+        }
         if ($account && (int) $parentId === $account->id) {
             throw ValidationException::withMessages(['parent_id' => 'An account cannot be its own parent.']);
         }
@@ -105,7 +117,14 @@ class AccountService
     /** @param array<string, mixed> $data */
     private function guardReferencedClassification(Account $account, array $data): void
     {
-        $protected = ['code', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'is_postable'];
+        $financialTypeChanged = (string) $account->getRawOriginal('financial_account_type') !== (string) ($data['financial_account_type'] ?? null);
+        if ($financialTypeChanged && $account->financialAccounts()->exists()) {
+            throw ValidationException::withMessages([
+                'financial_account_type' => 'A ledger linked to a cash or bank account cannot have its financial account eligibility changed.',
+            ]);
+        }
+
+        $protected = ['code', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'financial_account_type', 'is_postable'];
         $changed = collect($protected)->contains(fn (string $field): bool => (string) $account->getRawOriginal($field) !== (string) ($data[$field] ?? null));
         if (! $changed) {
             return;

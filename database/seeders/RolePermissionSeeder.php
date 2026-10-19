@@ -10,6 +10,18 @@ use App\Services\ApprovalAuthorityService;
 use Illuminate\Database\Seeder;
 use Spatie\Permission\PermissionRegistrar;
 
+/**
+ * Idempotent RBAC baseline. Permissions and roles are matched by name, and
+ * grants are only added, never replaced, so custom roles and users' existing
+ * assignments survive a re-run. The one removal is the Director-only
+ * permissions from the Administrator role.
+ *
+ * - Administrator: system administration and routine finance; never Director authority.
+ * - Director: Director-level approvals and governance; no user, role or settings administration.
+ * - Accountant: maker for journals, payments and setup. Approver / Manager: standard-tier checker.
+ * - Cashier / Fee Clerk: receipts and payment requests in one branch.
+ * - Management / Board and Auditor: read-only, with the audit log for the Auditor.
+ */
 class RolePermissionSeeder extends Seeder
 {
     /** @var array<string, list<string>> Grants for bank reconciliation, imprest, funds and staff advances. */
@@ -73,7 +85,8 @@ class RolePermissionSeeder extends Seeder
         }
 
         $roles = [
-            SystemRole::Administrator->value => ['permissions' => Permission::query()->pluck('name')->all(), 'protected' => true],
+            // System administration plus routine finance, but never the Director-only permissions.
+            SystemRole::Administrator->value => ['permissions' => Permission::query()->whereNotIn('name', ApprovalAuthorityService::DIRECTOR_ONLY_PERMISSIONS)->pluck('name')->all(), 'protected' => true],
             SystemRole::Accountant->value => ['permissions' => ['dashboard.view', 'branches.view', 'services.view', 'fiscal_years.view', 'fiscal_years.manage', 'accounting_periods.view', 'accounting_periods.manage', 'accounts.view', 'accounts.manage', 'accounts.create', 'accounts.update', 'accounts.import', 'accounts.deactivate', 'voucher_types.view', 'opening_balances.view', 'opening_balances.prepare', 'opening_balances.import', 'opening_balances.post', 'journals.view', 'journals.create', 'journals.update', 'journals.submit', 'journals.post', 'journals.reverse', 'ledgers.view', 'trial_balance.view', 'payments.view', 'payments.create', 'payments.post', 'purchase_orders.view', 'purchase_orders.create', 'reports.view', 'reports.export', 'payroll.view', 'payroll.manage']],
             SystemRole::Cashier->value => ['permissions' => ['dashboard.view', 'branches.view', 'services.view', 'payments.view', 'payments.create'], 'max_branches' => 1],
             SystemRole::Approver->value => ['permissions' => ['dashboard.view', 'branches.view', 'services.view', 'fiscal_years.view', 'accounting_periods.view', 'accounting_periods.close', 'accounts.view', 'opening_balances.view', 'opening_balances.approve', 'journals.view', 'journals.approve', 'journals.reject', 'payments.view', 'payments.approve', 'purchase_orders.view', 'purchase_orders.approve', 'reports.view']],
@@ -156,10 +169,14 @@ class RolePermissionSeeder extends Seeder
             $role->givePermissionTo($definition['permissions']);
         }
 
-        // Director approval authority is a role property, not a permission, so the
-        // Administrator role does not gain it by holding every permission.
+        // Director approval authority is a role property, not a permission. Earlier
+        // releases also gave the Administrator role the Director-only permissions;
+        // only those named permissions are removed, every other grant is kept.
         Role::query()->where('name', SystemRole::Director->value)->where('guard_name', 'web')->firstOrFail()
             ->forceFill(['approval_authority' => ApprovalAuthorityService::DIRECTOR])->save();
+        $administrator = Role::query()->where('name', SystemRole::Administrator->value)->where('guard_name', 'web')->firstOrFail();
+        $administrator->permissions()->whereIn('name', ApprovalAuthorityService::DIRECTOR_ONLY_PERMISSIONS)->get()
+            ->each(fn (Permission $permission) => $administrator->revokePermissionTo($permission));
         User::query()->where('is_administrator', true)->each(function (User $user): void {
             if (! $user->hasRole(SystemRole::Administrator->value)) {
                 $user->assignRole(SystemRole::Administrator->value);

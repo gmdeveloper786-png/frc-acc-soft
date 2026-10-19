@@ -40,6 +40,7 @@ beforeEach(function () {
     $this->karachi = Branch::factory()->create(['name' => 'Karachi Campus', 'status' => 'publish']);
     $this->admin = fundUser(SystemRole::Administrator, []);
     $this->checker = fundUser(SystemRole::Administrator, []);
+    $this->poster = fundUser(SystemRole::Administrator, []);
     $this->accountant = fundUser(SystemRole::Accountant, [$this->lahore]);
     $this->director = fundUser(SystemRole::Director, [$this->lahore]);
     $this->year = FiscalYear::factory()->create(['name' => 'FY 2026', 'start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
@@ -222,12 +223,12 @@ test('manual journal lines carry an optional fund through posting and reversal',
     $workflow->submit($journal, $this->admin);
     $this->actingAs($this->checker);
     $workflow->approve($journal->fresh(), $this->checker);
-    $this->post(route('journals.post', $journal))->assertRedirect();
+    $this->actingAs($this->poster)->post(route('journals.post', $journal))->assertRedirect();
     expect($journal->fresh()->status)->toBe(JournalStatus::Posted);
     $this->get(route('journals.show', $journal))->assertOk()->assertSee('DNR');
     expect(fn () => $journal->lines()->first()->update(['fund_id' => null]))->toThrow(LogicException::class);
 
-    $reversal = app(JournalReversalService::class)->reverseDirect($journal->fresh(), $this->period, '2026-01-20', 'Reverse the fund fixture', $this->checker);
+    $reversal = app(JournalReversalService::class)->reverse($journal->fresh(), $this->period, '2026-01-20', 'Reverse the fund fixture', $this->checker);
     expect($reversal->lines()->orderBy('line_number')->pluck('fund_id')->all())->toBe([$fund->id, $fund->id, null, null]);
 });
 
@@ -272,7 +273,7 @@ test('manual journals honour the restricted-fund rule when saved and again when 
     $workflow->submit($draft->fresh(), $this->admin);
     $approved = $workflow->approve($draft->fresh(), $this->checker);
     $zakat->permittedAccounts()->sync([$this->medicine->id]);
-    expect(fn () => app(JournalPostingService::class)->post($approved->fresh(), $this->checker))
+    expect(fn () => app(JournalPostingService::class)->post($approved->fresh(), $this->poster))
         ->toThrow(ValidationException::class, 'not a permitted charge for restricted fund ZKT');
     expect($approved->fresh()->status)->toBe(JournalStatus::Approved);
 });
@@ -306,9 +307,9 @@ test('unrestricted funds and untagged lines are not limited, and reversals of re
     $workflow = app(JournalWorkflowService::class);
     $draft = $workflow->create(fundJournalData($this, $this->medicine, $zakat, 'Permitted Zakat charge'), $this->admin);
     $workflow->submit($draft, $this->admin);
-    $posted = app(JournalPostingService::class)->post($workflow->approve($draft->fresh(), $this->checker)->fresh(), $this->checker);
+    $posted = app(JournalPostingService::class)->post($workflow->approve($draft->fresh(), $this->checker)->fresh(), $this->poster);
     $zakat->permittedAccounts()->sync([]);
-    $reversal = app(JournalReversalService::class)->reverseDirect($posted->fresh(), $this->period, '2026-01-20', 'Charged to the wrong fund', $this->checker);
+    $reversal = app(JournalReversalService::class)->reverse($posted->fresh(), $this->period, '2026-01-20', 'Charged to the wrong fund', $this->checker);
     expect($reversal->status)->toBe(JournalStatus::Posted);
 });
 

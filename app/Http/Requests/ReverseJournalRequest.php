@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Services\JournalReversalService;
 use Illuminate\Foundation\Http\FormRequest;
 
 class ReverseJournalRequest extends FormRequest
@@ -16,7 +17,7 @@ class ReverseJournalRequest extends FormRequest
         return [
             'accounting_period_id' => ['required', 'integer', 'exists:accounting_periods,id'],
             'transaction_date' => ['required', 'date_format:Y-m-d'],
-            'reason' => ['required', 'string', 'min:5', 'max:2000'],
+            'reason' => ['required', 'string', 'min:'.JournalReversalService::MIN_REASON_LENGTH, 'max:2000'],
         ];
     }
 }

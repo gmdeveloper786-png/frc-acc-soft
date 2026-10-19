@@ -1,7 +1,7 @@
 @extends('layouts.app')
 @section('title', 'Voucher Types')
 @section('page-title', 'Voucher Types')
-@section('page-description', 'Database-driven numbering foundations. Only Journal Voucher has a completed business workflow in this milestone.')
+@section('page-description', 'Configure the voucher codes and numbering sequences used by journals, receipts, payments, payroll, and other posted accounting workflows.')
 @section('content')
 <div class="surface-card"><div class="table-responsive"><table class="table accounting-table">
     <thead><tr><th>Code</th><th>Name</th><th>Prefix</th><th>Year</th><th>Padding</th><th>Reset</th><th>Status</th><th>Posted Use</th><th>Action</th></tr></thead>

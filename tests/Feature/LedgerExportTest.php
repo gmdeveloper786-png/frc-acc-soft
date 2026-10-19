@@ -32,6 +32,8 @@ beforeEach(function () {
     $this->maker->assignRole(SystemRole::Administrator->value);
     $this->checker = User::factory()->create();
     $this->checker->assignRole(SystemRole::Administrator->value);
+    $this->poster = User::factory()->create();
+    $this->poster->assignRole(SystemRole::Administrator->value);
     $this->year = FiscalYear::factory()->create(['name' => 'FY 2026', 'start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     foreach ([1 => ['2026-01-01', '2026-01-31'], 2 => ['2026-02-01', '2026-02-28'], 3 => ['2026-03-01', '2026-03-31']] as $number => [$start, $end]) {
         AccountingPeriod::factory()->create(['fiscal_year_id' => $this->year->id, 'name' => 'Period '.$number, 'period_number' => $number, 'start_date' => $start, 'end_date' => $end, 'status' => AccountingPeriodStatus::Open]);
@@ -68,7 +70,7 @@ function ledgerexportJournal(object $test, string $date, string $amount, string 
     $test->actingAs($test->checker);
     $workflow->approve($journal->fresh(), $test->checker);
 
-    return app(JournalPostingService::class)->post($journal->fresh(), $test->checker);
+    return app(JournalPostingService::class)->post($journal->fresh(), $test->poster);
 }
 
 /** @param array<string, mixed> $parameters */

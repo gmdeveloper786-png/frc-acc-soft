@@ -7,14 +7,13 @@ use App\Models\Branch;
 use App\Models\FiscalYear;
 use App\Models\OpeningBalanceBatch;
 use App\Models\User;
-use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class OpeningBalanceService
 {
-    public function __construct(private AuditLogger $audit, private AppSettings $settings) {}
+    public function __construct(private AuditLogger $audit, private OpeningBalanceValidationService $validator) {}
 
     /** @param array<string, mixed> $data */
     public function saveDraft(array $data, User $actor): OpeningBalanceBatch
@@ -22,20 +21,22 @@ class OpeningBalanceService
         $year = FiscalYear::query()->findOrFail($data['fiscal_year_id']);
         $branch = Branch::query()->findOrFail($data['branch_id']);
         $openingDate = (string) $data['opening_date'];
-        if ($openingDate < $year->start_date->toDateString() || $openingDate > $year->end_date->toDateString()) {
-            throw ValidationException::withMessages(['opening_date' => 'Opening date must fall inside the selected fiscal year.']);
-        }
-        $configuredDate = $this->settings->string('fiscal.initial_opening_date', '2026-01-01');
-        if ($openingDate !== $configuredDate) {
-            throw ValidationException::withMessages(['opening_date' => "Initial opening date is configured as {$configuredDate}."]);
-        }
+        $this->validator->assertOpeningDate($year, $openingDate);
 
         $debit = BigDecimal::zero();
         $credit = BigDecimal::zero();
         $prepared = [];
+        $seen = [];
         foreach ($data['lines'] as $index => $line) {
-            $lineDebit = BigDecimal::of((string) ($line['debit'] ?? '0'));
-            $lineCredit = BigDecimal::of((string) ($line['credit'] ?? '0'));
+            try {
+                $lineDebit = BigDecimal::of((string) ($line['debit'] ?? '0'));
+                $lineCredit = BigDecimal::of((string) ($line['credit'] ?? '0'));
+            } catch (\Throwable) {
+                throw ValidationException::withMessages(["lines.{$index}" => 'Enter valid decimal amounts.']);
+            }
+            if ($lineDebit->getScale() > 2 || $lineCredit->getScale() > 2) {
+                throw ValidationException::withMessages(["lines.{$index}" => 'Opening amounts may have no more than two decimal places.']);
+            }
             if ($lineDebit->isNegative() || $lineCredit->isNegative()) {
                 throw ValidationException::withMessages(["lines.{$index}" => 'Opening amounts cannot be negative.']);
             }
@@ -45,10 +46,12 @@ class OpeningBalanceService
             if ($lineDebit->isZero() && $lineCredit->isZero()) {
                 continue;
             }
-            $account = Account::query()->findOrFail($line['account_id']);
-            if (! $account->is_active || ! $account->is_postable || $account->level->value !== 'ledger') {
-                throw ValidationException::withMessages(["lines.{$index}.account_id" => 'Only active, postable ledger accounts may receive an opening amount.']);
+            $account = Account::query()->find($line['account_id']);
+            $this->validator->assertEligibleAccount($account, "lines.{$index}.account_id");
+            if (isset($seen[$account->id])) {
+                throw ValidationException::withMessages(["lines.{$index}.account_id" => 'Each account may appear only once in an opening balance.']);
             }
+            $seen[$account->id] = true;
             $debit = $debit->plus($lineDebit);
             $credit = $credit->plus($lineCredit);
             $prepared[] = ['account_id' => $account->id, 'debit' => (string) $lineDebit, 'credit' => (string) $lineCredit, 'source_reference' => $line['source_reference'] ?? null];
@@ -71,7 +74,7 @@ class OpeningBalanceService
             $batch->save();
             $batch->lines()->delete();
             $batch->lines()->createMany($prepared);
-            $this->audit->log('opening_balance.draft_saved', $batch, ['branch_id' => $branch->id, 'total_debit' => (string) $debit, 'journal_posting' => 'not_available_until_milestone_4']);
+            $this->audit->log('opening_balance.draft_saved', $batch, ['branch_id' => $branch->id, 'total_debit' => (string) $debit, 'journal_posting' => 'not_performed']);
 
             return $batch->load(['lines.account', 'branch', 'fiscalYear']);
         });

@@ -1,7 +1,56 @@
 import 'bootstrap';
+import { initializeOpeningBalanceForms } from './opening-balance-form';
 
 const root = document.documentElement;
 const sidebar = document.querySelector('#appSidebar');
+const sidebarNav = sidebar?.querySelector('.sidebar-nav');
+const activeSidebarLink = sidebarNav?.querySelector('.sidebar-link.active');
+const mobileSidebar = window.matchMedia('(max-width: 767.98px)');
+const sidebarScrollKey = 'frc-accounting-sidebar-scroll';
+let sidebarScrollFrame = null;
+
+const rememberSidebarScroll = () => {
+    if (! sidebarNav || sidebarScrollFrame !== null) {
+        return;
+    }
+
+    sidebarScrollFrame = requestAnimationFrame(() => {
+        localStorage.setItem(sidebarScrollKey, String(sidebarNav.scrollTop));
+        sidebarScrollFrame = null;
+    });
+};
+
+const revealActiveSidebarLink = () => {
+    if (! sidebarNav || ! activeSidebarLink) {
+        return;
+    }
+
+    const navBounds = sidebarNav.getBoundingClientRect();
+    const linkBounds = activeSidebarLink.getBoundingClientRect();
+    const comfortableMargin = Math.min(40, navBounds.height / 4);
+    const visibleTop = navBounds.top + comfortableMargin;
+    const visibleBottom = navBounds.bottom - comfortableMargin;
+
+    if (linkBounds.top < visibleTop) {
+        sidebarNav.scrollTop += linkBounds.top - visibleTop;
+    } else if (linkBounds.bottom > visibleBottom) {
+        sidebarNav.scrollTop += linkBounds.bottom - visibleBottom;
+    }
+};
+
+if (sidebarNav) {
+    const savedScroll = Number.parseFloat(localStorage.getItem(sidebarScrollKey) ?? '');
+
+    if (Number.isFinite(savedScroll)) {
+        sidebarNav.scrollTop = savedScroll;
+    }
+
+    sidebarNav.addEventListener('scroll', rememberSidebarScroll, { passive: true });
+
+    if (! mobileSidebar.matches) {
+        requestAnimationFrame(revealActiveSidebarLink);
+    }
+}
 
 document.querySelector('[data-sidebar-collapse]')?.addEventListener('click', () => {
     const nextState = root.dataset.sidebar === 'collapsed' ? 'expanded' : 'collapsed';
@@ -11,6 +60,19 @@ document.querySelector('[data-sidebar-collapse]')?.addEventListener('click', () 
 
 document.querySelector('[data-sidebar-mobile]')?.addEventListener('click', () => {
     document.body.classList.add('sidebar-open');
+    requestAnimationFrame(revealActiveSidebarLink);
+});
+
+mobileSidebar.addEventListener('change', (event) => {
+    if (! event.matches) {
+        requestAnimationFrame(revealActiveSidebarLink);
+    }
+});
+
+window.addEventListener('pageshow', (event) => {
+    if (event.persisted && ! mobileSidebar.matches) {
+        requestAnimationFrame(revealActiveSidebarLink);
+    }
 });
 
 document.querySelectorAll('[data-sidebar-close]').forEach((element) => {
@@ -41,6 +103,20 @@ document.querySelectorAll('[data-password-toggle]').forEach((button) => {
         button.setAttribute('aria-label', shouldShow ? 'Hide password' : 'Show password');
     });
 });
+
+document.querySelectorAll('[data-opening-fiscal-year]').forEach((select) => {
+    const openingDate = select.closest('form')?.querySelector('[data-opening-date]');
+    const syncOpeningDate = () => {
+        if (openingDate) {
+            openingDate.value = select.selectedOptions[0]?.dataset.startDate ?? '';
+        }
+    };
+
+    select.addEventListener('change', syncOpeningDate);
+    syncOpeningDate();
+});
+
+initializeOpeningBalanceForms();
 
 const journalForm = document.querySelector('[data-journal-form]');
 

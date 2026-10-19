@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\AccountLevel;
 use App\Enums\AccountType;
+use App\Enums\FinancialAccountType;
 use App\Enums\FinancialStatement;
 use App\Enums\NormalBalance;
 use Database\Factories\AccountFactory;
@@ -13,7 +14,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['code', 'name', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'is_postable', 'is_active', 'description', 'sort_order', 'created_by'])]
+#[Fillable(['code', 'name', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'financial_account_type', 'is_postable', 'is_active', 'description', 'sort_order', 'created_by'])]
 class Account extends Model
 {
     /** @use HasFactory<AccountFactory> */
@@ -26,6 +27,7 @@ class Account extends Model
             'level' => AccountLevel::class,
             'normal_balance' => NormalBalance::class,
             'financial_statement' => FinancialStatement::class,
+            'financial_account_type' => FinancialAccountType::class,
             'is_postable' => 'boolean',
             'is_active' => 'boolean',
         ];
@@ -54,5 +56,10 @@ class Account extends Model
     public function journalLines(): HasMany
     {
         return $this->hasMany(JournalLine::class);
+    }
+
+    public function financialAccounts(): HasMany
+    {
+        return $this->hasMany(FinancialAccount::class);
     }
 }

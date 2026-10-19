@@ -7,7 +7,9 @@ use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
 use App\Support\AppSettings;
+use Brick\Math\BigDecimal;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -19,6 +21,16 @@ use Illuminate\Validation\ValidationException;
 class ApprovalAuthorityService
 {
     public const DIRECTOR = 'director';
+
+    /**
+     * Permissions that only make sense together with Director authority. They
+     * stay on the Director role: the Administrator role does not receive them,
+     * and role administration cannot add them to any other role.
+     */
+    public const DIRECTOR_ONLY_PERMISSIONS = [
+        'payments.approve_high_value', 'vendor_payments.approve_high_value', 'purchase_orders.approve_high_value',
+        'purchase_bills.approve_po_exception', 'approval_delegations.manage', 'approval_authority.assign', 'approval_settings.manage',
+    ];
 
     public function __construct(private BranchAccess $branchAccess, private AppSettings $settings, private AuditLogger $audit) {}
 
@@ -43,6 +55,39 @@ class ApprovalAuthorityService
         $delegation = $this->activeDelegation($user, $branch, $amount);
 
         return $delegation && $user->can($standardPermission) ? 'delegation:'.$delegation->id : null;
+    }
+
+    /**
+     * Amount above which a journal, or the reversal of one, needs Director
+     * approval. It follows the Director payment threshold, which only a
+     * Director can change.
+     */
+    public function journalThreshold(): BigDecimal
+    {
+        return AccountingDecimal::of($this->settings->string('approval.payment_threshold', '150000.00') ?: '150000.00');
+    }
+
+    public function exceedsJournalThreshold(mixed $amount): bool
+    {
+        return AccountingDecimal::of($amount)->isGreaterThan($this->journalThreshold());
+    }
+
+    /**
+     * How the user may approve a journal (or a journal reversal) of this
+     * amount for this branch: "standard", "director_role", "delegation:{id}",
+     * or null when not eligible. The amount is the debit total only. Above the
+     * threshold only real Director authority qualifies; a permission or the
+     * Administrator role alone never does.
+     */
+    public function journalApprovalBasis(User $actor, Branch $branch, mixed $amount): ?string
+    {
+        if (! $actor->is_active || ! $actor->can('journals.approve') || ! $this->branchAccess->canAccess($actor, $branch)) {
+            return null;
+        }
+
+        return $this->exceedsJournalThreshold($amount)
+            ? $this->directorBasis($actor, $branch, $amount, 'journals.approve', 'journals.approve')
+            : 'standard';
     }
 
     /**
@@ -126,10 +171,51 @@ class ApprovalAuthorityService
         return $this->holdsDirectorRole($actor) && $actor->can('approval_authority.assign');
     }
 
+    /** Whether one of the user's roles carries Director authority, active or not. */
+    public function hasAuthorityRole(User $user): bool
+    {
+        return $user->roles->contains(fn (Role $role): bool => $role->approval_authority !== null);
+    }
+
+    /**
+     * A Director's account (name, credentials, status, branches and roles) is
+     * changed through user management only by another Director allowed to
+     * manage Director authority. The Director's own details go through the
+     * profile screen.
+     */
+    public function mayEditAccount(User $actor, User $target): bool
+    {
+        return ! $this->hasAuthorityRole($target) || (! $actor->is($target) && $this->mayManageDirectorRole($actor));
+    }
+
+    /**
+     * Whether the user may open and save the role form: never for a protected
+     * system role, and for a role carrying Director authority only when they
+     * may manage Director authority.
+     */
+    public function mayEditRole(User $actor, Role $role): bool
+    {
+        return ! $role->is_protected
+            && $actor->can('roles.update') && $actor->can('roles.assign_permissions')
+            && ($role->approval_authority === null || $this->mayManageDirectorRole($actor));
+    }
+
     /** @param list<string> $roleNames */
     private function includesProtectedRole(array $roleNames): bool
     {
         return Role::query()->whereIn('name', $roleNames)->where('is_protected', true)->exists();
+    }
+
+    /**
+     * Active users who hold Director authority by role, optionally excluding one.
+     *
+     * @return Collection<int, User>
+     */
+    public function activeDirectors(?User $except = null): Collection
+    {
+        return User::query()->where('is_active', true)->whereHas('roles', fn ($query) => $query->where('approval_authority', self::DIRECTOR))
+            ->when($except, fn ($query) => $query->whereKeyNot($except->getKey()))->get()
+            ->filter(fn (User $user): bool => $this->holdsDirectorRole($user))->values();
     }
 
     /** @return list<string> Names of the roles that carry Director authority. */
@@ -176,12 +262,13 @@ class ApprovalAuthorityService
      *
      * @param  list<string>  $granted
      * @param  list<string>  $revoked
+     * @param  array<string, mixed>  $context  Extra audit details, such as the console environment.
      */
-    public function recordRoleChange(User $target, array $granted, array $revoked, string $reason, string $source): void
+    public function recordRoleChange(User $target, array $granted, array $revoked, string $reason, string $source, array $context = []): void
     {
         foreach (['granted' => $granted, 'revoked' => $revoked] as $action => $roles) {
             if ($roles !== []) {
-                $this->audit->log('approval_authority.director_'.$action, $target, ['roles' => $roles, 'reason' => trim($reason), 'source' => $source]);
+                $this->audit->log('approval_authority.director_'.$action, $target, ['roles' => $roles, 'reason' => trim($reason), 'source' => $source, ...$context]);
             }
         }
     }
@@ -189,8 +276,10 @@ class ApprovalAuthorityService
     /**
      * Trusted provisioning: appoint or remove a Director from the server
      * console. Not reachable from any web route.
+     *
+     * @param  array<string, mixed>  $context  Extra audit details, such as the console environment.
      */
-    public function provision(User $target, bool $grant, string $reason, string $source): void
+    public function provision(User $target, bool $grant, string $reason, string $source, array $context = []): void
     {
         if (mb_strlen(trim($reason)) < 10) {
             throw ValidationException::withMessages(['reason' => 'Record a reason of at least 10 characters.']);
@@ -202,21 +291,68 @@ class ApprovalAuthorityService
         if ($grant && ! $target->is_active) {
             throw ValidationException::withMessages(['user' => 'Director authority cannot be given to an inactive user.']);
         }
-        if ($grant && $this->includesProtectedRole($target->roles()->pluck('name')->all())) {
+        if ($grant && ($target->is_administrator || $this->includesProtectedRole($target->roles()->pluck('name')->all()))) {
             throw ValidationException::withMessages(['user' => 'This user holds a system administration role. One account cannot be both Administrator and Director until the owner explicitly approves it.']);
         }
 
-        DB::transaction(function () use ($target, $grant, $reason, $source, $roles): void {
+        DB::transaction(function () use ($target, $grant, $reason, $source, $roles, $context): void {
             $held = $target->roles()->whereIn('name', $roles)->pluck('name')->all();
             if ($grant && $held === []) {
                 $target->assignRole($roles[0]);
-                $this->recordRoleChange($target, [$roles[0]], [], $reason, $source);
+                $this->recordRoleChange($target, [$roles[0]], [], $reason, $source, $context);
             } elseif (! $grant && $held !== []) {
                 foreach ($held as $role) {
                     $target->removeRole($role);
                 }
-                $this->recordRoleChange($target, [], $held, $reason, $source);
+                $this->recordRoleChange($target, [], $held, $reason, $source, $context);
             }
+        });
+    }
+
+    /**
+     * Trusted provisioning: add or remove branch assignments of an existing
+     * Director from the server console, without touching anything else on the
+     * account. Already assigned additions and unassigned removals are skipped,
+     * so a repeated run changes nothing and records nothing.
+     *
+     * @param  list<int>  $add
+     * @param  list<int>  $remove
+     * @param  array<string, mixed>  $context  Extra audit details, such as the console environment.
+     * @return array{before: list<int>, after: list<int>, added: list<int>, removed: list<int>}
+     */
+    public function changeDirectorBranches(User $target, array $add, array $remove, string $reason, string $source, array $context = []): array
+    {
+        if (mb_strlen(trim($reason)) < 10) {
+            throw ValidationException::withMessages(['reason' => 'Record a reason of at least 10 characters.']);
+        }
+        if (! $target->roles()->where('approval_authority', self::DIRECTOR)->exists()) {
+            throw ValidationException::withMessages(['user' => 'This user does not hold Director authority. Use the grant action to appoint a Director.']);
+        }
+        if (array_intersect($add, $remove) !== []) {
+            throw ValidationException::withMessages(['branch' => 'A branch cannot be added and removed in the same change.']);
+        }
+
+        return DB::transaction(function () use ($target, $add, $remove, $reason, $source, $context): array {
+            User::query()->whereKey($target->getKey())->lockForUpdate()->first();
+            $before = $target->branches()->pluck('branches.id')->map(fn ($id): int => (int) $id)->sort()->values()->all();
+            $added = array_values(array_diff($add, $before));
+            $removed = array_values(array_intersect($remove, $before));
+            $after = collect($before)->merge($added)->diff($removed)->sort()->values()->all();
+            if ($after === [] && $before !== []) {
+                throw ValidationException::withMessages(['branch' => 'A Director must keep at least one branch. Revoke Director authority instead.']);
+            }
+            if ($added === [] && $removed === []) {
+                return ['before' => $before, 'after' => $before, 'added' => [], 'removed' => []];
+            }
+
+            $target->branches()->syncWithoutDetaching($added);
+            $target->branches()->detach($removed);
+            $this->audit->log('approval_authority.director_branches_changed', $target, [
+                'branch_ids_before' => $before, 'branch_ids_after' => $after, 'added' => $added, 'removed' => $removed,
+                'reason' => trim($reason), 'source' => $source, ...$context,
+            ]);
+
+            return ['before' => $before, 'after' => $after, 'added' => $added, 'removed' => $removed];
         });
     }
 

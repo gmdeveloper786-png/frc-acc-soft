@@ -188,9 +188,12 @@ $period = AccountingPeriod::query()->where('fiscal_year_id', $year->id)->where('
     ?? AccountingPeriod::factory()->create(['fiscal_year_id' => $year->id, 'start_date' => now()->startOfMonth()->toDateString(), 'end_date' => now()->endOfMonth()->toDateString(), 'status' => AccountingPeriodStatus::Open]);
 $expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
 $income = Account::factory()->create(['account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
+// Three-person rule: the journals are prepared and approved by two users who are not among the racing posters.
+$maker = $user($branchA);
 $approver = $user($branchA);
-$draft = function () use ($year, $period, $branchA, $expense, $income, $actors, $approver): JournalEntry {
-    $journal = JournalEntry::query()->create(['voucher_type_id' => VoucherType::query()->where('code', 'JV')->value('id'), 'transaction_date' => now()->toDateString(), 'fiscal_year_id' => $year->id, 'accounting_period_id' => $period->id, 'branch_id' => $branchA->id, 'narration' => 'Concurrency journal', 'status' => JournalStatus::Approved, 'total_debit' => '100.0000', 'total_credit' => '100.0000', 'created_by' => $actors[0]->id, 'submitted_by' => $actors[0]->id, 'approved_by' => $approver->id, 'submitted_at' => now(), 'approved_at' => now()]);
+$approver->syncRoles([SystemRole::Approver->value]);
+$draft = function () use ($year, $period, $branchA, $expense, $income, $maker, $approver): JournalEntry {
+    $journal = JournalEntry::query()->create(['voucher_type_id' => VoucherType::query()->where('code', 'JV')->value('id'), 'transaction_date' => now()->toDateString(), 'fiscal_year_id' => $year->id, 'accounting_period_id' => $period->id, 'branch_id' => $branchA->id, 'narration' => 'Concurrency journal', 'status' => JournalStatus::Approved, 'total_debit' => '100.0000', 'total_credit' => '100.0000', 'created_by' => $maker->id, 'submitted_by' => $maker->id, 'approved_by' => $approver->id, 'submitted_at' => now(), 'approved_at' => now()]);
     $journal->lines()->create(['line_number' => 1, 'account_id' => $expense->id, 'debit' => '100.0000', 'credit' => '0.0000']);
     $journal->lines()->create(['line_number' => 2, 'account_id' => $income->id, 'debit' => '0.0000', 'credit' => '100.0000']);
 
