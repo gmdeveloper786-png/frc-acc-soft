@@ -13,7 +13,7 @@
     @php
         $statement = \App\Services\Reports\Statements\BalanceSheetStatement::class;
         $columns = ['balance'];
-        $money = fn (string $value): string => number_format((float) $value, 2);
+        $money = fn (string $value): string => \App\Services\AccountingDecimal::format($value, 2, 4);
     @endphp
     @include('reports.statements._filters', ['showPeriod' => false, 'showAsOf' => true])
     <section class="surface-card">

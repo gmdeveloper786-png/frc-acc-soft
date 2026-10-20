@@ -1,57 +1,63 @@
 <?php
 
 /*
- * Boots the application against a DISPOSABLE MySQL database for concurrency
- * tests. The database name is always "<development database>_concurrency_test"
- * and every script refuses to continue unless the live connection really
- * points at a name with that suffix. The development database is never used.
+ * Boots the application against the DISPOSABLE MySQL concurrency database
+ * frc_acct_qa_concurrency_test, using only the restricted QA account from
+ * .env.qa-mysql. The development .env credentials are never used. Before and
+ * after booting, Tests\Qa\QaMysqlGuard proves the live connection is that
+ * account on that database, with no access anywhere else; otherwise nothing runs.
  */
 
-use Dotenv\Dotenv;
 use Illuminate\Contracts\Console\Kernel;
-use Illuminate\Support\Facades\DB;
+use Tests\Qa\QaMysqlGuard;
 
 const CONCURRENCY_SUFFIX = '_concurrency_test';
 
 $root = dirname(__DIR__, 2);
 require $root.'/vendor/autoload.php';
 
-if (file_exists($root.'/bootstrap/cache/config.php')) {
-    fwrite(STDERR, "Refusing to run: a cached configuration exists (run without config:cache).\n");
+/** Print the guard's reason (never a password) and stop. */
+function concurrencyRefuse(Throwable $exception): never
+{
+    fwrite(STDERR, 'Refusing to run: '.$exception->getMessage().PHP_EOL);
     exit(2);
 }
 
-/** @return array<string, string> Database settings from .env; never printed. */
-function concurrencyEnv(string $root): array
+function concurrencyDatabase(string $root = ''): string
 {
-    $values = Dotenv::parse((string) file_get_contents($root.'/.env'));
-    if (($values['DB_CONNECTION'] ?? '') !== 'mysql' || blank($values['DB_DATABASE'] ?? null)) {
-        fwrite(STDERR, "Refusing to run: the application is not configured for MySQL.\n");
-        exit(2);
-    }
-
-    return $values;
+    return QaMysqlGuard::CONCURRENCY_DATABASE;
 }
 
-function concurrencyDatabase(string $root): string
+/**
+ * Verify the QA account directly, then boot Laravel on it and verify again.
+ *
+ * @return array{username: string} the verified QA account (no secrets)
+ */
+function concurrencyBoot(string $root): array
 {
-    return concurrencyEnv($root)['DB_DATABASE'].CONCURRENCY_SUFFIX;
-}
+    try {
+        QaMysqlGuard::refuseCachedConfiguration($root);
+        $credentials = QaMysqlGuard::credentials($root);
+        QaMysqlGuard::verify(QaMysqlGuard::connect($credentials, QaMysqlGuard::CONCURRENCY_DATABASE), QaMysqlGuard::CONCURRENCY_DATABASE, $credentials['username']);
 
-function concurrencyBoot(string $root): void
-{
-    $overrides = ['APP_ENV' => 'testing', 'DB_CONNECTION' => 'mysql', 'DB_DATABASE' => concurrencyDatabase($root), 'CACHE_STORE' => 'array', 'SESSION_DRIVER' => 'array', 'QUEUE_CONNECTION' => 'sync', 'MAIL_MAILER' => 'array'];
-    foreach ($overrides as $key => $value) {
-        putenv($key.'='.$value);
-        $_ENV[$key] = $value;
-        $_SERVER[$key] = $value;
-    }
-    $app = require $root.'/bootstrap/app.php';
-    $app->make(Kernel::class)->bootstrap();
+        $overrides = [
+            'APP_ENV' => 'testing', 'DB_CONNECTION' => 'mysql', 'DB_URL' => '',
+            'DB_HOST' => $credentials['host'], 'DB_PORT' => $credentials['port'], 'DB_DATABASE' => QaMysqlGuard::CONCURRENCY_DATABASE,
+            'DB_USERNAME' => $credentials['username'], 'DB_PASSWORD' => $credentials['password'],
+            'CACHE_STORE' => 'array', 'SESSION_DRIVER' => 'array', 'QUEUE_CONNECTION' => 'sync', 'MAIL_MAILER' => 'array',
+        ];
+        foreach ($overrides as $key => $value) {
+            putenv($key.'='.$value);
+            $_ENV[$key] = $value;
+            $_SERVER[$key] = $value;
+        }
+        $app = require $root.'/bootstrap/app.php';
+        $app->make(Kernel::class)->bootstrap();
 
-    $connection = DB::connection();
-    if ($connection->getDriverName() !== 'mysql' || ! str_ends_with((string) $connection->getDatabaseName(), CONCURRENCY_SUFFIX)) {
-        fwrite(STDERR, "Refusing to run: the connection does not point at the disposable concurrency database.\n");
-        exit(2);
+        QaMysqlGuard::verifyLaravel(QaMysqlGuard::CONCURRENCY_DATABASE, $credentials['username']);
+    } catch (Throwable $exception) {
+        concurrencyRefuse($exception);
     }
+
+    return ['username' => $credentials['username']];
 }

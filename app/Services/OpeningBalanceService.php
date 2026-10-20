@@ -43,6 +43,9 @@ class OpeningBalanceService
             if (! $lineDebit->isZero() && ! $lineCredit->isZero()) {
                 throw ValidationException::withMessages(["lines.{$index}" => 'Use either debit or credit for an account, not both.']);
             }
+            if (AccountingDecimal::exceedsMaximum($lineDebit) || AccountingDecimal::exceedsMaximum($lineCredit)) {
+                throw ValidationException::withMessages(["lines.{$index}" => AccountingDecimal::maximumMessage('Opening amounts')]);
+            }
             if ($lineDebit->isZero() && $lineCredit->isZero()) {
                 continue;
             }
@@ -58,6 +61,9 @@ class OpeningBalanceService
         }
         if ($prepared === []) {
             throw ValidationException::withMessages(['lines' => 'Enter at least one debit and one credit amount.']);
+        }
+        if (AccountingDecimal::exceedsMaximum($debit) || AccountingDecimal::exceedsMaximum($credit)) {
+            throw ValidationException::withMessages(['lines' => AccountingDecimal::maximumMessage('The opening balance debit and credit totals')]);
         }
         if (! $debit->isEqualTo($credit)) {
             throw ValidationException::withMessages(['lines' => 'Opening balances must be balanced. Debit: '.$debit.'; Credit: '.$credit.'.']);

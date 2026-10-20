@@ -36,12 +36,12 @@
                     <tbody>
                         <tr><th colspan="{{ count($columns) + 1 }}">Income</th></tr>
                         @include('reports.statements._tree', ['tree' => $report['income']])
-                        <tr><th>Total Income</th>@foreach($columns as $column)<th class="text-end font-monospace">{{ number_format((float) $report['total_income'][$column], 2) }}</th>@endforeach</tr>
+                        <tr><th>Total Income</th>@foreach($columns as $column)<th class="text-end font-monospace">{{ \App\Services\AccountingDecimal::format($report['total_income'][$column], 2, 4) }}</th>@endforeach</tr>
                         <tr><th colspan="{{ count($columns) + 1 }}">Expenses</th></tr>
                         @include('reports.statements._tree', ['tree' => $report['expenses']])
-                        <tr><th>Total Expenses</th>@foreach($columns as $column)<th class="text-end font-monospace">{{ number_format((float) $report['total_expenses'][$column], 2) }}</th>@endforeach</tr>
+                        <tr><th>Total Expenses</th>@foreach($columns as $column)<th class="text-end font-monospace">{{ \App\Services\AccountingDecimal::format($report['total_expenses'][$column], 2, 4) }}</th>@endforeach</tr>
                     </tbody>
-                    <tfoot><tr><th>Surplus/(Deficit)</th>@foreach($columns as $column)<th class="text-end font-monospace">{{ number_format((float) $report['surplus'][$column], 2) }}</th>@endforeach</tr></tfoot>
+                    <tfoot><tr><th>Surplus/(Deficit)</th>@foreach($columns as $column)<th class="text-end font-monospace">{{ \App\Services\AccountingDecimal::format($report['surplus'][$column], 2, 4) }}</th>@endforeach</tr></tfoot>
                 </table></div>
             @endif
             <p class="table-subtext mt-3">{{ \App\Services\Reports\Statements\IncomeExpenditureStatement::METHOD }}</p>

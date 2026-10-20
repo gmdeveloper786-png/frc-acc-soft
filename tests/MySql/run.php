@@ -22,6 +22,13 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
+// Disabled: this runner connects with the development .env account (full rights
+// on the development database), creates and drops databases derived from its
+// name, and opens the development database for a schema comparison. Use the
+// restricted, allowlisted runners described in tests/Qa/README.md instead.
+fwrite(STDERR, "Refusing to run: tests/MySql/run.php uses the development database account. Use tests/Qa/run-mysql-pest.php (see tests/Qa/README.md).\n");
+exit(2);
+
 const MIGRATION = '2026_10_18_000001_scope_financial_account_ledger_to_branch';
 const PEST_FILES = [
     'tests/Feature/BranchCashLedgerTest.php', 'tests/Feature/FeePostingTest.php', 'tests/Feature/FeeSettlementMappingTest.php',

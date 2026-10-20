@@ -44,12 +44,16 @@ class OpeningBalanceController extends Controller
         return redirect()->route('opening-balances.show', $batch)->with('status', 'Balanced opening draft saved. Nothing has been posted.');
     }
 
-    public function show(Request $request, OpeningBalanceBatch $openingBalance, BranchAccess $access): View
+    public function show(Request $request, OpeningBalanceBatch $openingBalance, BranchAccess $access, OpeningBalancePostingService $posting): View
     {
         abort_unless($access->canAccess($request->user(), $openingBalance->branch), 403);
         $openingBalance->load(['branch', 'fiscalYear', 'lines.account', 'journalEntry']);
+        $canApprove = $posting->canApprove($openingBalance, $request->user());
+        $canPost = $posting->canPost($openingBalance, $request->user());
+        $canReturn = $posting->canReturn($openingBalance, $request->user());
+        $approvalInvalid = $openingBalance->status === 'approved' && ! $posting->approvalIsValid($openingBalance);
 
-        return view('accounting-setup.opening-balances.show', compact('openingBalance'));
+        return view('accounting-setup.opening-balances.show', compact('openingBalance', 'canApprove', 'canPost', 'canReturn', 'approvalInvalid'));
     }
 
     public function approve(Request $request, OpeningBalanceBatch $openingBalance, OpeningBalancePostingService $posting): RedirectResponse
@@ -57,6 +61,14 @@ class OpeningBalanceController extends Controller
         $posting->approve($openingBalance, $request->user());
 
         return back()->with('status', 'Opening balance approved.');
+    }
+
+    public function returnToDraft(Request $request, OpeningBalanceBatch $openingBalance, OpeningBalancePostingService $posting): RedirectResponse
+    {
+        $validated = $request->validate(['reason' => ['required', 'string', 'min:'.OpeningBalancePostingService::MIN_RETURN_REASON_LENGTH, 'max:2000']]);
+        $posting->returnToDraft($openingBalance, $validated['reason'], $request->user());
+
+        return back()->with('status', 'Opening balance returned to draft. It needs a new independent approval before it can be posted.');
     }
 
     public function post(Request $request, OpeningBalanceBatch $openingBalance, OpeningBalancePostingService $posting): RedirectResponse

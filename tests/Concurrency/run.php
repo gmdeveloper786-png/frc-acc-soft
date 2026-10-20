@@ -3,13 +3,14 @@
 /*
  * Real MySQL/InnoDB concurrency verification.
  *
- *   php tests/Concurrency/run.php [--rounds=5] [--fresh] [--drop]
+ *   php tests/Concurrency/run.php --confirm-wipe=frc_acct_qa_concurrency_test [--rounds=5]
  *
- * Creates (or reuses) the disposable database "<dev database>_concurrency_test",
- * migrates it, builds isolated fixtures and launches several PHP processes that
- * hit the same rows at the same moment. --fresh drops and recreates that one
- * database first; --drop removes it at the end. The development database is
- * never read or written.
+ * Runs only on the DBA-created database frc_acct_qa_concurrency_test with the
+ * restricted QA account from .env.qa-mysql (see tests/Qa/README.md). It wipes
+ * and rebuilds that database's tables (migrate:fresh), builds isolated fixtures
+ * and launches several PHP processes, each with its own MySQL connection, that
+ * hit the same rows at the same moment. It never creates or drops a database,
+ * and never reads .env credentials or the development database.
  */
 
 use App\Enums\AccountingPeriodStatus;
@@ -22,6 +23,7 @@ use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\AppSetting;
 use App\Models\AssetCategory;
+use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\DepreciationRun;
 use App\Models\DepreciationRunLine;
@@ -35,6 +37,7 @@ use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\InventoryMovement;
 use App\Models\JournalEntry;
+use App\Models\OpeningBalanceBatch;
 use App\Models\OperationalTransaction;
 use App\Models\PayrollComponent;
 use App\Models\PayrollRun;
@@ -49,7 +52,13 @@ use App\Services\Assets\AssetPolicy;
 use App\Services\Assets\DepreciationRunService;
 use App\Services\Assets\FixedAssetService;
 use App\Services\Inventory\InventoryService;
+use App\Services\JournalPostingService;
+use App\Services\JournalReversalService;
+use App\Services\JournalWorkflowService;
+use App\Services\OpeningBalancePostingService;
+use App\Services\OpeningBalanceService;
 use App\Services\Payroll\PayrollRunService;
+use App\Services\TrialBalanceService;
 use App\Support\AppSettings;
 use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\RolePermissionSeeder;
@@ -58,27 +67,28 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Tests\Qa\QaMysqlGuard;
 
 require __DIR__.'/bootstrap.php';
 $root = dirname(__DIR__, 2);
-$options = getopt('', ['rounds::', 'fresh', 'drop']);
+$options = getopt('', ['rounds::', 'fresh', 'drop', 'confirm-wipe:']);
+if (isset($options['fresh']) || isset($options['drop'])) {
+    fwrite(STDERR, "Refusing to run: --fresh and --drop were removed. The DBA creates and drops the database; this script never does.\n");
+    exit(2);
+}
 $rounds = max(1, (int) ($options['rounds'] ?? 5));
+$database = concurrencyDatabase();
 
-// 1. Create the disposable database with a raw connection (no application boot yet).
-$env = concurrencyEnv($root);
-$database = concurrencyDatabase($root);
-if (! str_ends_with($database, CONCURRENCY_SUFFIX)) {
-    exit("Refusing to run.\n");
+// 1. The DBA pre-creates the database. This run only rebuilds its tables, which needs explicit confirmation.
+try {
+    QaMysqlGuard::requireWipeConfirmation($argv, $database);
+} catch (Throwable $exception) {
+    concurrencyRefuse($exception);
 }
-$pdo = new PDO(sprintf('mysql:host=%s;port=%s', $env['DB_HOST'] ?? '127.0.0.1', $env['DB_PORT'] ?? '3306'), $env['DB_USERNAME'] ?? 'root', $env['DB_PASSWORD'] ?? '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-if (isset($options['fresh'])) {
-    $pdo->exec("DROP DATABASE IF EXISTS `{$database}`");
-}
-$pdo->exec("CREATE DATABASE IF NOT EXISTS `{$database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
 
-// 2. Boot against it (guarded) and migrate forward.
+// 2. Boot against it (the QA account is verified before and after booting) and rebuild the schema.
 concurrencyBoot($root);
-Artisan::call('migrate', ['--force' => true]);
+Artisan::call('migrate:fresh', ['--force' => true]);
 foreach ([AppSettingSeeder::class, RolePermissionSeeder::class, VoucherTypeSeeder::class] as $seeder) {
     app($seeder)->run();
 }
@@ -330,6 +340,202 @@ $depreciationVouchers = JournalEntry::query()->where('source_type', Depreciation
 $check('No asset has two active depreciation lines for one period; depreciation vouchers are distinct', $duplicateLines->isEmpty() && $depreciationVouchers->count() === $rounds && $depreciationVouchers->unique()->count() === $rounds, $duplicateLines->count().' duplicate asset/period pair(s), '.$depreciationVouchers->count().' depreciation voucher(s)');
 
 // --- Constraints that guard the remaining races ---------------------------------------------------
+// --- Phase 4: reversals, opening balances and maker-approver-poster separation ------------
+// Shared fixtures are created once. Every race and ordered test below builds its own journal,
+// batch or branch, so no round depends on records or voucher numbers from an earlier round.
+$p4Workflow = app(JournalWorkflowService::class);
+$p4Reversals = app(JournalReversalService::class);
+$p4Openings = app(OpeningBalancePostingService::class);
+$p4Journal = function (User $approvedBy) use ($p4Workflow, $maker, $year, $period, $branchA, $expense, $income): JournalEntry {
+    auth()->setUser($maker);
+    $journal = $p4Workflow->create(['voucher_type_id' => VoucherType::query()->where('code', 'JV')->value('id'), 'transaction_date' => now()->toDateString(), 'fiscal_year_id' => $year->id, 'accounting_period_id' => $period->id, 'branch_id' => $branchA->id, 'narration' => 'Phase 4 concurrency journal',
+        'lines' => [['account_id' => $expense->id, 'debit' => '250.0000', 'credit' => '0'], ['account_id' => $income->id, 'debit' => '0', 'credit' => '250.0000']]], $maker);
+    $p4Workflow->submit($journal, $maker);
+    auth()->setUser($approvedBy);
+
+    return $p4Workflow->approve($journal->fresh(), $approvedBy)->fresh();
+};
+
+// Opening balances use a separate future fiscal year so their opening date and period cannot collide with the sections above.
+$openingYear = FiscalYear::factory()->create(['name' => 'FY QA Opening '.$tag, 'start_date' => '2031-01-01', 'end_date' => '2031-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => false]);
+AccountingPeriod::factory()->create(['fiscal_year_id' => $openingYear->id, 'name' => 'January 2031', 'period_number' => 1, 'start_date' => '2031-01-01', 'end_date' => '2031-01-31', 'status' => AccountingPeriodStatus::Open]);
+AppSetting::query()->updateOrCreate(['key' => 'fiscal.initial_opening_date'], ['value' => '2031-01-01']);
+Cache::flush();
+$openingAsset = Account::factory()->create();
+$openingEquity = Account::factory()->create(['account_type' => 'equity', 'normal_balance' => 'credit']);
+$openingBranch = function () use ($actors, $maker, $approver): Branch {
+    $branch = Branch::factory()->create(['status' => 'publish']);
+    foreach ([...$actors->all(), $maker, $approver] as $member) {
+        $member->branches()->syncWithoutDetaching([$branch->id]);
+    }
+
+    return $branch;
+};
+$approvedOpening = function (Branch $branch) use ($openingYear, $openingAsset, $openingEquity, $maker, $approver, $p4Openings): OpeningBalanceBatch {
+    auth()->setUser($maker);
+    $batch = app(OpeningBalanceService::class)->saveDraft(['fiscal_year_id' => $openingYear->id, 'branch_id' => $branch->id, 'opening_date' => '2031-01-01',
+        'lines' => [['account_id' => $openingAsset->id, 'debit' => '5000.00', 'credit' => '0'], ['account_id' => $openingEquity->id, 'debit' => '0', 'credit' => '5000.00']]], $maker);
+    auth()->setUser($approver);
+
+    return $p4Openings->approve($batch, $approver)->fresh();
+};
+$openingJournals = fn (OpeningBalanceBatch $batch) => JournalEntry::query()->where('source_type', 'opening_balance')->where('source_id', (string) $batch->id)->get();
+// An Administrator approver also holds the posting permission, so the separation rule (not a missing permission) is what refuses it.
+$adminApprover = $user($branchA);
+$adminApprover->syncRoles([SystemRole::Administrator->value]);
+$eligible = $actors[2];
+$p4Results = [];
+
+echo PHP_EOL."Phase 4 concurrent races ({$rounds} rounds; each race starts separate processes, each with its own MySQL connection, at the same instant)".PHP_EOL;
+for ($round = 1; $round <= $rounds; $round++) {
+    $checksBefore = count($checks);
+
+    // 1. The same approved manual journal posted by 4 eligible users at once.
+    $journal = $p4Journal($approver);
+    $results = $race($actors->slice(3, 4)->values()->map(fn (User $actor): array => ['scenario' => 'journal_post', 'arguments' => ['user_id' => $actor->id, 'journal_id' => $journal->id]])->all());
+    $p4Results = [...$p4Results, ...$results];
+    $fresh = $journal->fresh();
+    $check("Round {$round}: one approved journal posted by 4 users at once is posted exactly once", $succeeded($results) === 1 && $fresh->status === JournalStatus::Posted && filled($fresh->voucher_number) && JournalEntry::query()->where('voucher_number', $fresh->voucher_number)->count() === 1, $succeeded($results).' ok, voucher '.$fresh->voucher_number.$failures($results));
+
+    // 2. Concurrent reversal requests for the same posted journal.
+    $original = app(JournalPostingService::class)->post($p4Journal($approver), $actors->last());
+    $results = $race($actors->take(4)->map(fn (User $actor): array => ['scenario' => 'reversal_request', 'arguments' => ['user_id' => $actor->id, 'journal_id' => $original->id, 'period_id' => $period->id, 'date' => now()->toDateString()]])->values()->all());
+    $p4Results = [...$p4Results, ...$results];
+    $requests = JournalEntry::query()->where('reversal_of_id', $original->id)->get();
+    $check("Round {$round}: 4 concurrent reversal requests for one journal: exactly one request, original still posted", $succeeded($results) === 1 && $requests->count() === 1 && $requests->first()->status === JournalStatus::Submitted && $original->fresh()->status === JournalStatus::Posted, $succeeded($results).' ok'.$failures($results));
+
+    // 3. Concurrent posting of the same approved reversal.
+    $request = $requests->first();
+    if ($request !== null) {
+        auth()->setUser($approver);
+        $p4Reversals->approve($request, $approver);
+    }
+    $reversalPosters = $actors->reject(fn (User $actor): bool => $request !== null && $actor->id === $request->created_by)->take(4)->values();
+    $results = $race($reversalPosters->map(fn (User $actor): array => ['scenario' => 'reversal_post', 'arguments' => ['user_id' => $actor->id, 'reversal_id' => $request?->id ?? 0]])->all());
+    $p4Results = [...$p4Results, ...$results];
+    $reversing = JournalEntry::query()->where('reversal_of_id', $original->id)->get();
+    $check("Round {$round}: 4 concurrent posts of one approved reversal: one reversing voucher, original reversed once", $succeeded($results) === 1 && $reversing->count() === 1 && $reversing->first()->status === JournalStatus::Posted && filled($reversing->first()->voucher_number) && $original->fresh()->status === JournalStatus::Reversed, $succeeded($results).' ok'.$failures($results));
+
+    // 4. Concurrent posting of the same approved opening balance (a new branch every round).
+    $batch = $approvedOpening($openingBranch());
+    $results = $race($actors->take(4)->map(fn (User $actor): array => ['scenario' => 'opening_post', 'arguments' => ['user_id' => $actor->id, 'batch_id' => $batch->id]])->values()->all());
+    $p4Results = [...$p4Results, ...$results];
+    $journals = $openingJournals($batch);
+    $check("Round {$round}: 4 concurrent posts of one approved opening balance: exactly one posted journal linked to the batch", $succeeded($results) === 1 && $batch->fresh()->status === 'posted' && $journals->count() === 1 && $journals->first()->status === JournalStatus::Posted && $batch->fresh()->journal_entry_id === $journals->first()->id, $succeeded($results).' ok'.$failures($results));
+
+    // 5. Return to Draft racing two posting attempts on the same approved batch.
+    $returnBranch = $openingBranch();
+    $secondApprover = $user($returnBranch);
+    $secondApprover->syncRoles([SystemRole::Approver->value]);
+    $batch = $approvedOpening($returnBranch);
+    $results = $race([
+        ['scenario' => 'opening_post', 'arguments' => ['user_id' => $actors[0]->id, 'batch_id' => $batch->id]],
+        ['scenario' => 'opening_post', 'arguments' => ['user_id' => $actors[1]->id, 'batch_id' => $batch->id]],
+        ['scenario' => 'opening_return', 'arguments' => ['user_id' => $approver->id, 'batch_id' => $batch->id]],
+        ['scenario' => 'opening_return', 'arguments' => ['user_id' => $secondApprover->id, 'batch_id' => $batch->id]],
+    ]);
+    $p4Results = [...$p4Results, ...$results];
+    $posts = count(array_filter(array_slice($results, 0, 2), fn (array $result): bool => $result['ok'] === true));
+    $returns = count(array_filter(array_slice($results, 2, 2), fn (array $result): bool => $result['ok'] === true));
+    $final = $batch->fresh();
+    $journalCount = $openingJournals($batch)->count();
+    $consistent = ($final->status === 'posted' && $posts === 1 && $returns === 0 && $journalCount === 1)
+        || ($final->status === 'draft' && $returns === 1 && $posts === 0 && $journalCount === 0 && $final->approved_by === null);
+    $check("Round {$round}: Return to Draft racing two posts: exactly one outcome wins and batch, approval and journal agree", $consistent, "status {$final->status}, {$posts} post(s), {$returns} return(s), {$journalCount} journal(s)".$failures($results));
+
+    // 6. Maker, approver and an eligible poster racing to post the same journal.
+    $contested = $p4Journal($adminApprover);
+    $results = $race([
+        ['scenario' => 'journal_post', 'arguments' => ['user_id' => $maker->id, 'journal_id' => $contested->id]],
+        ['scenario' => 'journal_post', 'arguments' => ['user_id' => $adminApprover->id, 'journal_id' => $contested->id]],
+        ['scenario' => 'journal_post', 'arguments' => ['user_id' => $eligible->id, 'journal_id' => $contested->id]],
+    ]);
+    $p4Results = [...$p4Results, ...$results];
+    $check("Round {$round}: maker, approver and an eligible poster racing: only the independent poster posts", $results[0]['ok'] === false && $results[1]['ok'] === false && $results[2]['ok'] === true && (int) $contested->fresh()->posted_by === $eligible->id, 'posted by '.($contested->fresh()->posted_by ?? 'nobody').$failures($results));
+
+    echo '  Round '.$round.': '.(count($checks) - $checksBefore).' race checks run'.PHP_EOL;
+}
+
+// --- Phase 4: controlled ordering ---------------------------------------------------------
+// These tests SEQUENCE operations rather than overlap them: each step is a separate worker
+// process with its own connection, and the next step starts only after the previous worker has
+// exited and reported its result (the acknowledgement). They prove the rule for a given order;
+// they are not simultaneous lock contention, which the races above cover.
+echo PHP_EOL.'Phase 4 controlled ordering (sequenced: each step starts only after the previous worker has reported; not simultaneous)'.PHP_EOL;
+$runOne = function (string $scenario, array $arguments): array {
+    $payload = base64_encode(json_encode([...$arguments, 'start_at' => 0]));
+    $process = proc_open([PHP_BINARY, __DIR__.'/worker.php', $scenario, $payload], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $output = stream_get_contents($pipes[1]);
+    $errors = stream_get_contents($pipes[2]);
+    proc_close($process);
+
+    return json_decode((string) $output, true) ?? ['ok' => false, 'error' => 'WorkerCrash', 'message' => mb_substr(trim($errors.' '.$output), 0, 200)];
+};
+$describe = fn (array $result): string => $result['ok'] ? 'ok' : $result['error'].': '.Str::limit((string) ($result['message'] ?? ''), 90);
+$orderedJournal = function (User $refused, string $reason, User $approvedBy, string $label) use ($p4Journal, $runOne, $describe, $check, $eligible, $actors, &$p4Results): void {
+    $journal = $p4Journal($approvedBy);
+    $first = $runOne('journal_post', ['user_id' => $refused->id, 'journal_id' => $journal->id]);
+    $afterFirst = $journal->fresh();
+    $check("Ordered {$label}: posting first is refused ({$reason}); the journal stays Approved with no voucher", $first['ok'] === false && str_contains((string) ($first['message'] ?? ''), $reason) && $afterFirst->status === JournalStatus::Approved && $afterFirst->voucher_number === null && $afterFirst->posted_by === null, $describe($first));
+    $second = $runOne('journal_post', ['user_id' => $eligible->id, 'journal_id' => $journal->id]);
+    $third = $runOne('journal_post', ['user_id' => $actors[3]->id, 'journal_id' => $journal->id]);
+    $final = $journal->fresh();
+    $check("Ordered {$label}: an independent poster then posts it exactly once", $second['ok'] === true && $third['ok'] === false && $final->status === JournalStatus::Posted && (int) $final->posted_by === $eligible->id && JournalEntry::query()->where('voucher_number', $final->voucher_number)->count() === 1, $describe($second).' then '.$describe($third));
+    $p4Results = [...$p4Results, $first, $second, $third];
+};
+
+// A. The maker tries to post while the journal is still Approved.
+$orderedJournal($maker, 'You prepared this journal', $approver, 'A (maker first)');
+// B. The approver, who also holds the posting permission, tries to post while it is still Approved.
+$orderedJournal($adminApprover, 'You approved this journal', $adminApprover, 'B (approver first)');
+
+// C. Opening balance: an eligible poster completes the post first, then Return to Draft is attempted.
+$batch = $approvedOpening($openingBranch());
+$first = $runOne('opening_post', ['user_id' => $eligible->id, 'batch_id' => $batch->id]);
+$posted = $batch->fresh();
+$journals = $openingJournals($batch);
+$journal = $journals->first();
+$sums = $journal ? DB::table('journal_lines')->where('journal_entry_id', $journal->id)->selectRaw('coalesce(sum(debit), 0) as d, coalesce(sum(credit), 0) as c')->first() : null;
+$postedAudit = AuditLog::query()->where('event', 'opening_balance.posted')->where('auditable_id', $batch->id)->first();
+$identities = $journal !== null
+    && [(int) $posted->created_by, (int) $posted->approved_by, (int) $posted->posted_by] === [$maker->id, $approver->id, $eligible->id]
+    && [(int) $journal->created_by, (int) $journal->approved_by, (int) $journal->posted_by] === [$maker->id, $approver->id, $eligible->id]
+    && (int) $postedAudit?->actor_id === $eligible->id && (int) ($postedAudit?->properties['approved_by'] ?? 0) === $approver->id;
+$check('Ordered C (post first): one balanced journal, batch Posted, maker, approver and poster recorded', $first['ok'] === true && $posted->status === 'posted' && $journals->count() === 1 && (int) $posted->journal_entry_id === $journal->id
+    && bccomp((string) $sums->d, (string) $sums->c, 4) === 0 && bccomp((string) $sums->d, (string) $journal->total_debit, 4) === 0 && $identities, $describe($first));
+$second = $runOne('opening_return', ['user_id' => $approver->id, 'batch_id' => $batch->id]);
+$after = $batch->fresh();
+$check('Ordered C (post first): the later Return to Draft is refused; the batch stays Posted with its approval and one journal', $second['ok'] === false && str_contains((string) ($second['message'] ?? ''), 'has not been posted') && $after->status === 'posted' && (int) $after->approved_by === $approver->id && $openingJournals($batch)->count() === 1, $describe($second));
+$p4Results = [...$p4Results, $first, $second];
+
+// --- Integrity after all concurrent activity ----------------------------------------------
+echo PHP_EOL.'Integrity after concurrent activity'.PHP_EOL;
+$unbalanced = DB::table('journal_lines')->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+    ->whereIn('journal_entries.status', [JournalStatus::Posted->value, JournalStatus::Reversed->value])
+    ->select('journal_lines.journal_entry_id')->groupBy('journal_lines.journal_entry_id')->havingRaw('SUM(journal_lines.debit) <> SUM(journal_lines.credit)')->pluck('journal_entry_id');
+$check('Every posted journal balances line by line', $unbalanced->isEmpty(), $unbalanced->implode(', '));
+$headerMismatch = DB::table('journal_entries as e')->whereIn('e.status', [JournalStatus::Posted->value, JournalStatus::Reversed->value])
+    ->whereRaw('e.total_debit <> (select coalesce(sum(l.debit), 0) from journal_lines l where l.journal_entry_id = e.id)')->count();
+$check('Posted journal totals equal the sum of their lines (no partial lines)', $headerMismatch === 0, $headerMismatch.' mismatched');
+$leftovers = JournalEntry::query()->where('source_type', 'opening_balance')->where('status', '!=', JournalStatus::Posted->value)->count();
+$check('Losing opening balance workers left no unposted journal behind', $leftovers === 0, $leftovers.' left');
+$duplicateVouchers = DB::table('journal_entries')->select('voucher_number')->whereNotNull('voucher_number')->groupBy('voucher_number')->havingRaw('COUNT(*) > 1')->get()->count();
+$duplicateKeys = DB::table('journal_entries')->select('source_key')->whereNotNull('source_key')->groupBy('source_key')->havingRaw('COUNT(*) > 1')->get()->count();
+$check('No duplicate journal voucher numbers or source keys', $duplicateVouchers === 0 && $duplicateKeys === 0, "{$duplicateVouchers} voucher, {$duplicateKeys} source key duplicates");
+$selfPosted = JournalEntry::query()->whereIn('status', [JournalStatus::Posted->value, JournalStatus::Reversed->value])
+    ->where(fn ($query) => $query->whereNull('source_type')->orWhere('source_type', 'journal_reversal'))
+    ->where(fn ($query) => $query->whereColumn('posted_by', 'created_by')->orWhereColumn('posted_by', 'submitted_by')->orWhereColumn('posted_by', 'approved_by'))->count();
+$selfPostedOpening = OpeningBalanceBatch::query()->where('status', 'posted')
+    ->where(fn ($query) => $query->whereColumn('posted_by', 'created_by')->orWhereColumn('posted_by', 'updated_by')->orWhereColumn('posted_by', 'approved_by'))->count();
+$check('No manual journal, reversal or opening balance was posted by its preparer or approver', $selfPosted === 0 && $selfPostedOpening === 0, "{$selfPosted} journal(s), {$selfPostedOpening} opening balance(s)");
+$unexpected = collect($p4Results)->where('ok', false)->reject(fn (array $result): bool => in_array($result['error'], ['ValidationException', 'HttpException', 'AccessDeniedHttpException'], true));
+$check('Phase 4 workers raised no unexpected error (SQL, lock wait, deadlock or crash)', $unexpected->isEmpty(), count($p4Results).' worker result(s); '.$unexpected->map(fn (array $result): string => $result['error'].': '.Str::limit((string) ($result['message'] ?? ''), 80))->implode('; '));
+$branchIds = Branch::query()->pluck('id')->all();
+foreach ([$year, $openingYear] as $trialYear) {
+    $trial = app(TrialBalanceService::class)->report($trialYear->id, $trialYear->end_date->toDateString(), $branchIds);
+    $check("Trial Balance for {$trialYear->name} is balanced after concurrent posting", $trial['balanced'] === true, $trial['total_debit'].' / '.$trial['total_credit']);
+}
+
 echo PHP_EOL.'Unique constraints present on MySQL'.PHP_EOL;
 $unique = collect(DB::select('select table_name as t, group_concat(column_name order by seq_in_index) as c from information_schema.statistics where table_schema = database() and non_unique = 0 group by table_name, index_name'))->map(fn ($row): string => $row->t.'('.$row->c.')');
 foreach (['depreciation_run_lines(fixed_asset_id,accounting_period_id,active_key)', 'payroll_runs(branch_id,accounting_period_id,active_key)', 'journal_entries(source_key)', 'journal_entries(voucher_number)', 'voucher_sequences(voucher_type_id,scope_key)', 'document_sequences(document_type,scope_key)', 'purchase_orders(po_number)', 'inventory_balances(item_id,branch_id,location_id)'] as $expected) {
@@ -338,8 +544,4 @@ foreach (['depreciation_run_lines(fixed_asset_id,accounting_period_id,active_key
 
 $failed = count(array_filter($checks, fn (array $item): bool => ! $item['passed']));
 echo PHP_EOL.count($checks).' checks, '.$failed.' failed.'.PHP_EOL;
-if (isset($options['drop'])) {
-    $pdo->exec("DROP DATABASE IF EXISTS `{$database}`");
-    echo "Disposable database {$database} dropped.".PHP_EOL;
-}
 exit($failed === 0 ? 0 : 1);

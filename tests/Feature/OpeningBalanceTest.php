@@ -10,6 +10,7 @@ use App\Models\Branch;
 use App\Models\FiscalYear;
 use App\Models\OpeningBalanceBatch;
 use App\Models\User;
+use App\Services\AccountingDecimal;
 use App\Services\OpeningBalanceImportService;
 use App\Services\OpeningBalancePostingService;
 use App\Services\OpeningBalanceService;
@@ -408,7 +409,11 @@ test('valid asset liability and equity opening workflow approves and posts', fun
     $checker->branches()->attach($this->branch);
     $service = app(OpeningBalancePostingService::class);
     $approved = $service->approve($batch, $checker);
-    $posted = $service->post($approved, $checker);
+    // Three-person rule: a third authorized user posts.
+    $poster = User::factory()->create();
+    $poster->assignRole(SystemRole::Administrator->value);
+    $poster->branches()->attach($this->branch);
+    $posted = $service->post($approved, $poster);
 
     expect($posted->status)->toBe('posted')
         ->and($posted->journal_entry_id)->not->toBeNull()
@@ -553,8 +558,10 @@ test('precision beyond what a spreadsheet number can show is rejected rather tha
 
     expect($rows['11301']['errors'])->toContain('Amounts may have no more than two decimal places.')
         ->and($rows['11301']['display'])->toBe('1234567890123.001')
-        // A large whole number shown in scientific format is a number, not scientific-notation text.
-        ->and($rows['11302']['errors'])->toBe([])->and($rows['11302']['debit'])->toBe('10000000000000000.00')
+        // A large whole number shown in scientific format is a number, not scientific-notation text:
+        // it is judged on its value (here above the journal ceiling), never as notation.
+        ->and($rows['11302']['errors'])->toBe([AccountingDecimal::maximumMessage()])
+        ->and($rows['11302']['display'])->toBe('10000000000000000.00')
         ->and($rows['11303']['errors'])->toContain('Amounts may have no more than two decimal places.');
 });
 

@@ -93,7 +93,9 @@ class OpeningBalanceValidationService
 
             $lineDebit = BigDecimal::of($line->debit);
             $lineCredit = BigDecimal::of($line->credit);
-            if ($lineDebit->isNegative() || $lineCredit->isNegative()) {
+            if (AccountingDecimal::exceedsMaximum($lineDebit) || AccountingDecimal::exceedsMaximum($lineCredit)) {
+                $errors["lines.{$index}"] = AccountingDecimal::maximumMessage('Opening amounts');
+            } elseif ($lineDebit->isNegative() || $lineCredit->isNegative()) {
                 $errors["lines.{$index}"] = 'Opening amounts cannot be negative.';
             } elseif ((! $lineDebit->isZero() && ! $lineCredit->isZero()) || ($lineDebit->isZero() && $lineCredit->isZero())) {
                 $errors["lines.{$index}"] = 'Enter a positive debit or credit, but not both.';
@@ -103,7 +105,9 @@ class OpeningBalanceValidationService
             $credit = $credit->plus($lineCredit);
         }
 
-        if ($debit->isZero() || $credit->isZero() || ! $debit->isEqualTo($credit)) {
+        if (AccountingDecimal::exceedsMaximum($debit) || AccountingDecimal::exceedsMaximum($credit)) {
+            $errors['lines'] = AccountingDecimal::maximumMessage('The opening balance debit and credit totals');
+        } elseif ($debit->isZero() || $credit->isZero() || ! $debit->isEqualTo($credit)) {
             $errors['lines'] = 'Opening balance debit and credit totals must be positive and exactly equal.';
         }
         if (! $debit->isEqualTo(BigDecimal::of($batch->total_debit))

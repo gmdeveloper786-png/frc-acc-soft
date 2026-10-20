@@ -38,7 +38,7 @@
     <div class="kpi-grid">
         @foreach ($figures as $figure)
             @php
-                $display = $figure['value'] === null ? null : ($figure['percent'] ? number_format((float) $figure['value'], 2).'%' : $currency.' '.number_format((float) $figure['value'], 2));
+                $display = $figure['value'] === null ? null : ($figure['percent'] ? \App\Services\AccountingDecimal::format($figure['value'], 2).'%' : $currency.' '.\App\Services\AccountingDecimal::format($figure['value'], 2, 4));
             @endphp
             <x-kpi-card :label="$figure['label']" :value="$display" :tone="$figure['tone']" :icon="$figure['icon']" :status="$figure['status']" :description="$figure['description']" />
         @endforeach
@@ -65,7 +65,7 @@
                             <td>{{ $journal->transaction_date->format($dateFormat) }}</td>
                             <td>{{ $journal->branch?->name }}</td>
                             <td>{{ Str::limit($journal->narration, 60) }}</td>
-                            <td class="text-end font-monospace">@if($journal->source_type === 'payroll_run' && ! auth()->user()->can('payroll.view_sensitive'))<span class="text-muted">Restricted</span>@else{{ number_format((float) $journal->total_debit, 2) }}@endif</td>
+                            <td class="text-end font-monospace">@if($journal->source_type === 'payroll_run' && ! auth()->user()->can('payroll.view_sensitive'))<span class="text-muted">Restricted</span>@else{{ \App\Services\AccountingDecimal::format($journal->total_debit, 2, 4) }}@endif</td>
                             <td><span class="status-badge {{ $journal->status === \App\Enums\JournalStatus::Reversed ? 'danger' : 'success' }}">{{ ucfirst($journal->status->value) }}</span></td>
                         </tr>
                     @endforeach

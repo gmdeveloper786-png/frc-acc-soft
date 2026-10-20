@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\WithinFinancialMaximum;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -29,8 +30,8 @@ class StoreOpeningBalanceRequest extends FormRequest
             'source_reference' => ['nullable', 'string', 'max:255'],
             'lines' => ['required', 'array', 'min:1'],
             'lines.*.account_id' => ['required', 'integer', 'distinct', 'exists:accounts,id'],
-            'lines.*.debit' => ['nullable', 'decimal:0,2', 'min:0'],
-            'lines.*.credit' => ['nullable', 'decimal:0,2', 'min:0'],
+            'lines.*.debit' => ['nullable', 'decimal:0,2', 'min:0', new WithinFinancialMaximum],
+            'lines.*.credit' => ['nullable', 'decimal:0,2', 'min:0', new WithinFinancialMaximum],
             'lines.*.source_reference' => ['nullable', 'string', 'max:255'],
         ];
     }

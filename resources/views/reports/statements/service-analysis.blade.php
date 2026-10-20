@@ -16,7 +16,7 @@
     @else
         @php
             $statement = \App\Services\Reports\Statements\ServiceAnalysisStatement::class;
-            $money = fn (?string $value): string => $value === null ? '—' : number_format((float) $value, 2);
+            $money = fn (?string $value): string => $value === null ? '—' : \App\Services\AccountingDecimal::format($value, 2, 4);
             $sections = ['income' => ['Service-wise fee income', 'Total Income'], 'expenses' => ['Service-wise recorded expenses', 'Total Expenses']];
         @endphp
         <section class="surface-card mb-4">

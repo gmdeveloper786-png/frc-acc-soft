@@ -129,6 +129,7 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/opening-balances', [OpeningBalanceController::class, 'store'])->middleware('permission:opening_balances.prepare')->name('opening-balances.store');
     Route::get('/opening-balances/{openingBalance}', [OpeningBalanceController::class, 'show'])->middleware('permission:opening_balances.view')->name('opening-balances.show');
     Route::post('/opening-balances/{openingBalance}/approve', [OpeningBalanceController::class, 'approve'])->middleware('permission:opening_balances.approve')->name('opening-balances.approve');
+    Route::post('/opening-balances/{openingBalance}/return', [OpeningBalanceController::class, 'returnToDraft'])->middleware('permission:opening_balances.approve')->name('opening-balances.return');
     Route::post('/opening-balances/{openingBalance}/post', [OpeningBalanceController::class, 'post'])->middleware('permission:opening_balances.post')->name('opening-balances.post');
 
     Route::get('/voucher-types', [VoucherTypeController::class, 'index'])->middleware('permission:voucher_types.view')->name('voucher-types.index');

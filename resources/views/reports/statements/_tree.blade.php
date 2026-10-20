@@ -3,7 +3,7 @@
     <tr>
         <td style="padding-left: {{ 12 + $row['depth'] * 18 }}px" class="{{ $row['is_ledger'] ? '' : 'fw-semibold' }}"><code>{{ $row['code'] }}</code> {{ $row['name'] }}</td>
         @foreach($columns as $column)
-            <td class="text-end font-monospace {{ $row['is_ledger'] ? '' : 'fw-semibold' }}">{{ number_format((float) $row['amounts'][$column], 2) }}</td>
+            <td class="text-end font-monospace {{ $row['is_ledger'] ? '' : 'fw-semibold' }}">{{ \App\Services\AccountingDecimal::format($row['amounts'][$column], 2, 4) }}</td>
         @endforeach
     </tr>
 @empty

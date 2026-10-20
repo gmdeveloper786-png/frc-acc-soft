@@ -6,13 +6,17 @@
  * service call inside the disposable database, and prints a JSON result.
  */
 
+use App\Models\AccountingPeriod;
 use App\Models\DepreciationRun;
 use App\Models\JournalEntry;
+use App\Models\OpeningBalanceBatch;
 use App\Models\PayrollRun;
 use App\Models\User;
 use App\Services\Assets\DepreciationRunService;
 use App\Services\Inventory\InventoryService;
 use App\Services\JournalPostingService;
+use App\Services\JournalReversalService;
+use App\Services\OpeningBalancePostingService;
 use App\Services\OperationalTransactionService;
 use App\Services\Payroll\PayrollRunService;
 use App\Services\PurchaseBillService;
@@ -42,6 +46,10 @@ try {
         'payroll_pay' => app(PayrollRunService::class)->pay(PayrollRun::query()->findOrFail($arguments['run_id']), $arguments['payload'], $actor)->id,
         'depreciation_post' => JournalEntry::query()->findOrFail(app(DepreciationRunService::class)->post(DepreciationRun::query()->findOrFail($arguments['run_id']), $actor)->journal_entry_id)->voucher_number,
         'depreciation_prepare' => app(DepreciationRunService::class)->prepare((int) $arguments['branch_id'], (int) $arguments['period_id'], $actor)->id,
+        'reversal_request' => app(JournalReversalService::class)->request(JournalEntry::query()->findOrFail($arguments['journal_id']), AccountingPeriod::query()->findOrFail($arguments['period_id']), $arguments['date'], 'Concurrent reversal request test', $actor)->id,
+        'reversal_post' => app(JournalReversalService::class)->post(JournalEntry::query()->findOrFail($arguments['reversal_id']), $actor)->voucher_number,
+        'opening_post' => app(OpeningBalancePostingService::class)->post(OpeningBalanceBatch::query()->findOrFail($arguments['batch_id']), $actor)->journal_entry_id,
+        'opening_return' => app(OpeningBalancePostingService::class)->returnToDraft(OpeningBalanceBatch::query()->findOrFail($arguments['batch_id']), 'Concurrent return to draft test', $actor)->status,
         default => throw new InvalidArgumentException('Unknown scenario.'),
     };
     echo json_encode(['ok' => true, 'result' => $result]);

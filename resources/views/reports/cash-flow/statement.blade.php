@@ -21,7 +21,7 @@
 @if($ready && $statement['state'] === 'ready')
     @php
         $currency = $appSettings['currency_code'];
-        $money = fn (string $value): string => number_format((float) $value, 2);
+        $money = fn (string $value): string => \App\Services\AccountingDecimal::format($value, 2, 4);
         $period = \Illuminate\Support\Carbon::parse($from)->format('d M Y').' to '.\Illuminate\Support\Carbon::parse($to)->format('d M Y');
     @endphp
 

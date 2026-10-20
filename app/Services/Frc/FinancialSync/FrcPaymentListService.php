@@ -4,6 +4,7 @@ namespace App\Services\Frc\FinancialSync;
 
 use App\Models\FrcPayment;
 use App\Models\User;
+use App\Services\AccountingDecimal;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Database\Eloquent\Builder;
@@ -101,9 +102,6 @@ class FrcPaymentListService
     /** Two-decimal display with thousands separators, without floats. */
     public static function money(mixed $value): string
     {
-        $rounded = (string) BigDecimal::of((string) ($value ?? '0'))->toScale(2, RoundingMode::HalfUp);
-        [$whole, $fraction] = explode('.', ltrim($rounded, '-'));
-
-        return (str_starts_with($rounded, '-') ? '-' : '').strrev(implode(',', str_split(strrev($whole), 3))).'.'.$fraction;
+        return AccountingDecimal::format($value, 2);
     }
 }

@@ -197,6 +197,9 @@ class OpeningBalanceImportService
                 if ($debit->getScale() > 2 || $credit->getScale() > 2) {
                     $errors[] = 'Amounts may have no more than two decimal places.';
                 }
+                if (AccountingDecimal::exceedsMaximum($debit) || AccountingDecimal::exceedsMaximum($credit)) {
+                    $errors[] = AccountingDecimal::maximumMessage();
+                }
                 if ($debit->isNegative() || $credit->isNegative()) {
                     $errors[] = 'Amounts cannot be negative.';
                 }
@@ -229,6 +232,9 @@ class OpeningBalanceImportService
         if ($rows === []) {
             throw ValidationException::withMessages(['workbook' => 'The workbook contains no opening balance rows.']);
         }
+        if (AccountingDecimal::exceedsMaximum($totalDebit) || AccountingDecimal::exceedsMaximum($totalCredit)) {
+            throw ValidationException::withMessages(['workbook' => AccountingDecimal::maximumMessage('The total debit and total credit of the file')]);
+        }
 
         return [
             'rows' => $rows,
@@ -241,12 +247,17 @@ class OpeningBalanceImportService
     /** @param array<int, array<string, mixed>> $rows */
     private function persistableRows(array $rows): array
     {
+        // A row already rejected for exceeding the maximum keeps its exact text in
+        // the verified source (shown by displayAmounts()); its preview row records
+        // 0, because the amount may not even fit the import row's DECIMAL column.
+        $storable = fn (string $amount): string => AccountingDecimal::exceedsMaximum(BigDecimal::of($amount)->abs()) ? '0' : $amount;
+
         return collect($rows)->map(fn (array $row): array => [
             'row_number' => $row['row_number'],
             'account_code' => $row['account_code'],
             'account_id' => $row['account_id'],
-            'debit' => $row['debit'],
-            'credit' => $row['credit'],
+            'debit' => $storable($row['debit']),
+            'credit' => $storable($row['credit']),
             'source_reference' => $row['source_reference'],
             'validation_errors' => $row['validation_errors'],
         ])->all();

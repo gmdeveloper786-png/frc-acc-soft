@@ -11,9 +11,9 @@
 
 @section('content')
     <div class="kpi-grid">
-        <x-kpi-card label="Total debit" value="{{ number_format((float) $openingBalanceImport->total_debit, 2) }}" icon="Dr" tone="navy" description="Validated rows" />
-        <x-kpi-card label="Total credit" value="{{ number_format((float) $openingBalanceImport->total_credit, 2) }}" icon="Cr" tone="teal" description="Validated rows" />
-        <x-kpi-card label="Difference" value="{{ number_format((float) $openingBalanceImport->difference, 2) }}" icon="Δ" tone="amber" description="Must be exactly zero" />
+        <x-kpi-card label="Total debit" value="{{ \App\Services\AccountingDecimal::format($openingBalanceImport->total_debit, 2) }}" icon="Dr" tone="navy" description="Validated rows" />
+        <x-kpi-card label="Total credit" value="{{ \App\Services\AccountingDecimal::format($openingBalanceImport->total_credit, 2) }}" icon="Cr" tone="teal" description="Validated rows" />
+        <x-kpi-card label="Difference" value="{{ \App\Services\AccountingDecimal::format($openingBalanceImport->difference, 2) }}" icon="Δ" tone="amber" description="Must be exactly zero" />
         <x-kpi-card label="Invalid rows" value="{{ $openingBalanceImport->rows->filter(fn ($row) => ! empty($row->validation_errors))->count() }}" icon="!" tone="rose" description="Must be corrected" />
     </div>
 
