@@ -205,15 +205,16 @@ test('users without posting permission or branch access are refused and double p
         ->and(AuditLog::query()->where('event', 'journal.posted')->where('auditable_id', $journal->id)->count())->toBe(1);
 });
 
-test('system journals keep their own controls and are not subject to the manual three person rule', function () {
+test('opening balances apply their own three person rule through their own workflow', function () {
     $equity = Account::factory()->create(['account_type' => 'equity', 'normal_balance' => 'credit']);
     $asset = Account::factory()->create(['account_type' => 'asset']);
     $batch = OpeningBalanceBatch::factory()->create(['branch_id' => $this->branch, 'fiscal_year_id' => $this->year, 'opening_date' => '2026-01-01', 'status' => 'approved', 'total_debit' => '5000.0000', 'total_credit' => '5000.0000', 'created_by' => $this->accountant, 'approved_by' => $this->admin, 'approved_at' => now()]);
     $batch->lines()->create(['account_id' => $asset->id, 'debit' => '5000.0000', 'credit' => '0.0000']);
     $batch->lines()->create(['account_id' => $equity->id, 'debit' => '0.0000', 'credit' => '5000.0000']);
 
-    // The opening balance workflow lets its approver post, as before.
-    $posted = app(OpeningBalancePostingService::class)->post($batch, $this->admin);
+    // Its approver cannot post it; an independent third user with the posting permission can.
+    expect(fn () => app(OpeningBalancePostingService::class)->post($batch, $this->admin))->toThrow(ValidationException::class);
+    $posted = app(OpeningBalancePostingService::class)->post($batch->fresh(), $this->secondAccountant);
     expect($posted->status)->toBe('posted')
         ->and(JournalEntry::query()->findOrFail($posted->journal_entry_id)->status)->toBe(JournalStatus::Posted);
 });

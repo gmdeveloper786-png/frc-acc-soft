@@ -153,9 +153,9 @@ test('an authorized reversal of a payment and a posted opening balance are prese
     $batch = OpeningBalanceBatch::factory()->create(['branch_id' => $this->branch, 'fiscal_year_id' => $this->year, 'opening_date' => '2026-01-01', 'status' => 'approved', 'total_debit' => '5000.0000', 'total_credit' => '5000.0000', 'created_by' => $this->maker, 'approved_by' => $this->checker, 'approved_at' => now()]);
     $batch->lines()->create(['account_id' => $this->equity->id, 'debit' => '5000.0000', 'credit' => '0.0000']);
     $batch->lines()->create(['account_id' => $this->bankLedger->id, 'debit' => '0.0000', 'credit' => '5000.0000']);
-    $postedBatch = app(OpeningBalancePostingService::class)->post($batch, $this->checker);
+    $postedBatch = app(OpeningBalancePostingService::class)->post($batch, $this->poster);
     expect($postedBatch->status)->toBe('posted')
-        ->and(fn () => app(OpeningBalancePostingService::class)->post($postedBatch, $this->checker))->toThrow(ValidationException::class);
+        ->and(fn () => app(OpeningBalancePostingService::class)->post($postedBatch, $this->poster))->toThrow(ValidationException::class);
 });
 
 test('repeated payments against one bill are flagged as a possible split and overpayment stays blocked', function () {

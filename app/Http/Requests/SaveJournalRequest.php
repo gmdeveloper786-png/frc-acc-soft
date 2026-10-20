@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\WithinFinancialMaximum;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -27,8 +28,8 @@ class SaveJournalRequest extends FormRequest
             'lines.*.description' => ['nullable', 'string', 'max:255'],
             'lines.*.service_id' => ['nullable', 'integer', 'exists:frc_services,id'],
             'lines.*.fund_id' => ['nullable', 'integer', Rule::exists('funds', 'id')->where('is_active', true)],
-            'lines.*.debit' => ['nullable', 'decimal:0,4', 'min:0'],
-            'lines.*.credit' => ['nullable', 'decimal:0,4', 'min:0'],
+            'lines.*.debit' => ['nullable', 'decimal:0,4', 'min:0', new WithinFinancialMaximum],
+            'lines.*.credit' => ['nullable', 'decimal:0,4', 'min:0', new WithinFinancialMaximum],
         ];
     }
 }

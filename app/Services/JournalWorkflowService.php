@@ -160,6 +160,35 @@ class JournalWorkflowService
             && $this->authority->journalApprovalBasis($actor, $journal->branch, $journal->total_debit) !== null;
     }
 
+    /**
+     * Every line, and the debit and credit totals, must fit what a journal can
+     * hold. Checked before anything is written, so an oversized amount never
+     * reaches the database.
+     *
+     * @param  list<array<string,mixed>>  $lines
+     */
+    private function assertWithinMaximum(array $lines): void
+    {
+        $debit = BigDecimal::zero();
+        $credit = BigDecimal::zero();
+        foreach ($lines as $index => $line) {
+            foreach (['debit', 'credit'] as $side) {
+                try {
+                    $amount = BigDecimal::of(trim((string) ($line[$side] ?? '')) ?: '0');
+                } catch (\Throwable) {
+                    throw ValidationException::withMessages(["lines.{$index}.{$side}" => 'Enter a valid decimal amount.']);
+                }
+                if (AccountingDecimal::exceedsMaximum($amount)) {
+                    throw ValidationException::withMessages(["lines.{$index}.{$side}" => AccountingDecimal::maximumMessage()]);
+                }
+                $side === 'debit' ? $debit = $debit->plus($amount) : $credit = $credit->plus($amount);
+            }
+        }
+        if (AccountingDecimal::exceedsMaximum($debit) || AccountingDecimal::exceedsMaximum($credit)) {
+            throw ValidationException::withMessages(['lines' => AccountingDecimal::maximumMessage('The journal debit and credit totals')]);
+        }
+    }
+
     /** A reversal request moves only through the reversal workflow. */
     private function assertNotReversalRequest(JournalEntry $journal): void
     {
@@ -179,6 +208,7 @@ class JournalWorkflowService
     {
         // Restricted-fund rule (always enforced; posting checks it again).
         $this->fundRules->check(array_values($lines), fn (int|string $index): string => "lines.{$index}.account_id");
+        $this->assertWithinMaximum(array_values($lines));
         $journal->lines()->delete();
         $debit = BigDecimal::zero()->toScale(4);
         $credit = BigDecimal::zero()->toScale(4);

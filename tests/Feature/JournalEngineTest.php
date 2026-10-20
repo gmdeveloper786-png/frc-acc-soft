@@ -300,11 +300,11 @@ test('approved opening balance posts once through journal engine', function () {
     $this->actingAs($this->checker);
     $service = app(OpeningBalancePostingService::class);
     $service->approve($batch, $this->checker);
-    $posted = $service->post($batch->fresh(), $this->checker);
+    $posted = $service->post($batch->fresh(), $this->poster);
 
     expect($posted->status)->toBe('posted')->and($posted->journal_entry_id)->not->toBeNull()
         ->and($posted->journalEntry->status)->toBe(JournalStatus::Posted);
-    expect(fn () => $service->post($posted, $this->checker))->toThrow(ValidationException::class);
+    expect(fn () => $service->post($posted, $this->poster))->toThrow(ValidationException::class);
 });
 
 test('opening balance source cannot bypass balance sheet account restrictions', function () {

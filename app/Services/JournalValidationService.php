@@ -53,8 +53,15 @@ class JournalValidationService
                 $errors["lines.{$index}.service_id"] = 'The selected service is not available.';
             }
 
+            if (AccountingDecimal::exceedsMaximum($lineDebit) || AccountingDecimal::exceedsMaximum($lineCredit)) {
+                $errors["lines.{$index}"] = AccountingDecimal::maximumMessage();
+            }
+
             $debit = $debit->plus($lineDebit);
             $credit = $credit->plus($lineCredit);
+        }
+        if (AccountingDecimal::exceedsMaximum($debit) || AccountingDecimal::exceedsMaximum($credit)) {
+            $errors['lines'] = AccountingDecimal::maximumMessage('The journal debit and credit totals');
         }
 
         // Fund checks never block a reversal: correcting posted history must always be possible.
@@ -70,7 +77,7 @@ class JournalValidationService
             }
         }
 
-        if ($debit->isZero() || $credit->isZero() || ! $debit->isEqualTo($credit)) {
+        if (! isset($errors['lines']) && ($debit->isZero() || $credit->isZero() || ! $debit->isEqualTo($credit))) {
             $errors['lines'] = 'Journal debit and credit totals must be positive and exactly equal.';
         }
 
