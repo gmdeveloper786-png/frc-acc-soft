@@ -37,7 +37,7 @@ beforeEach(function () {
     $this->branch = Branch::factory()->create(['status' => 'publish']);
     $this->cashLedger = Account::factory()->create(['code' => '111101']);
     $this->bankLedger = Account::factory()->create(['code' => '111102']);
-    $this->expenseLedger = Account::factory()->create(['code' => '511101', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->expenseLedger = Account::factory()->create(['code' => '511101', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
     $this->incomeLedger = Account::factory()->create(['code' => '411101', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
     $this->payableLedger = Account::factory()->create(['code' => '211101', 'account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => $this->cashLedger]);
@@ -99,6 +99,35 @@ test('paid and accrued expenses use distinct credit mappings', function () {
         $posted = app(OperationalTransactionService::class)->post($expense->fresh(), $this->checker);
         expect($posted->journalEntry->lines[1]->account_id)->toBe($expectedCredit);
     }
+});
+
+test('expense form exposes cash bank only for paid settlement and rejects forged accrued accounts', function () {
+    $this->get(route('transactions.create', OperationalTransactionType::Expense->value))->assertOk()
+        ->assertSee('id="expense-settlement"', false)
+        ->assertSee('id="financial-account-container"', false)
+        ->assertSee('refreshExpenseSettlement', false)
+        ->assertSee('financialAccount.disabled = isAccrued', false)
+        ->assertSee("financialAccount.value = '';", false);
+
+    $data = operationalPayload($this, OperationalTransactionType::Expense);
+    $data['settlement_type'] = 'accrued';
+    $data['payable_account_id'] = $this->payableLedger->id;
+    $data['narration'] = 'Forged accrued financial account';
+
+    $this->post(route('transactions.store'), $data)->assertSessionHasErrors('financial_account_id');
+    $this->assertDatabaseMissing('operational_transactions', ['narration' => 'Forged accrued financial account']);
+    expect(fn () => app(OperationalTransactionService::class)->create($data, $this->maker))->toThrow(ValidationException::class);
+});
+
+test('paid expense requires a cash or bank account at every entry point', function () {
+    $data = operationalPayload($this, OperationalTransactionType::Expense);
+    $data['settlement_type'] = 'paid';
+    $data['financial_account_id'] = null;
+    $data['narration'] = 'Paid expense without account';
+
+    $this->post(route('transactions.store'), $data)->assertSessionHasErrors('financial_account_id');
+    $this->assertDatabaseMissing('operational_transactions', ['narration' => 'Paid expense without account']);
+    expect(fn () => app(OperationalTransactionService::class)->create($data, $this->maker))->toThrow(ValidationException::class);
 });
 
 test('purchase bill posts payable supports partial payment and blocks overpayment', function () {

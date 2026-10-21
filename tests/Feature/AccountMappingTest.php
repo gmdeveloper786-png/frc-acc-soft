@@ -34,7 +34,7 @@ beforeEach(function () {
     $this->branch = Branch::factory()->create(['status' => 'publish']);
     $this->payable = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->income = Account::factory()->create(['account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
-    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
     $this->cashLedger = Account::factory()->create();
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => $this->cashLedger]);
     $this->actingAs($this->admin);

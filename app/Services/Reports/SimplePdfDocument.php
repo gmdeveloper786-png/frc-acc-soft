@@ -62,9 +62,10 @@ class SimplePdfDocument
         $this->stream .= sprintf("BT /%s %.2F Tf %.2F %.2F Td (%s) Tj ET\n", $bold ? 'F2' : 'F1', $size, $position, $this->cursor, $this->escape($encoded));
     }
 
-    public function rule(): void
+    /** Draw a horizontal separator above the current cursor. */
+    public function rule(float $offset = 3): void
     {
-        $this->stream .= sprintf("0.5 w %.2F %.2F m %.2F %.2F l S\n", self::MARGIN, $this->cursor + 3, self::PAGE_WIDTH - self::MARGIN, $this->cursor + 3);
+        $this->stream .= sprintf("0.5 w %.2F %.2F m %.2F %.2F l S\n", self::MARGIN, $this->cursor + $offset, self::PAGE_WIDTH - self::MARGIN, $this->cursor + $offset);
     }
 
     /** Shorten text so it fits the given width. */
@@ -79,6 +80,49 @@ class SimplePdfDocument
         }
 
         return mb_convert_encoding($encoded, 'UTF-8', 'Windows-1252').'...';
+    }
+
+    /**
+     * Wrap text into complete lines that fit the supplied width. Long unbroken
+     * words are split only when necessary, so table cells never overlap rows.
+     *
+     * @return list<string>
+     */
+    public function wrap(string $text, float $width, float $size, bool $bold = false): array
+    {
+        $text = trim($text);
+        if ($text === '') {
+            return [''];
+        }
+
+        $lines = [];
+        $line = '';
+        foreach (preg_split('/\s+/u', $text) ?: [] as $word) {
+            $candidate = $line === '' ? $word : $line.' '.$word;
+            if ($this->width($this->encode($candidate), $size, $bold) <= $width) {
+                $line = $candidate;
+
+                continue;
+            }
+            if ($line !== '') {
+                $lines[] = $line;
+                $line = '';
+            }
+            while ($word !== '' && $this->width($this->encode($word), $size, $bold) > $width) {
+                $length = mb_strlen($word);
+                do {
+                    $part = mb_substr($word, 0, $length--);
+                } while ($length > 0 && $this->width($this->encode($part), $size, $bold) > $width);
+                $lines[] = $part;
+                $word = mb_substr($word, mb_strlen($part));
+            }
+            $line = $word;
+        }
+        if ($line !== '') {
+            $lines[] = $line;
+        }
+
+        return $lines === [] ? [''] : $lines;
     }
 
     public function output(): string

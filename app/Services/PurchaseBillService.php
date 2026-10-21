@@ -29,6 +29,7 @@ class PurchaseBillService
         private AuditLogger $audit,
         private AccountMappingService $mappings,
         private ApprovalAuthorityService $authority,
+        private PurchaseBillDebitAccountEligibility $debitAccountEligibility,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -46,15 +47,7 @@ class PurchaseBillService
             $this->assertLedger((int) $data['payable_account_id'], 'payable_account_id', ['liability']);
             $order = filled($data['purchase_order_id'] ?? null) ? $this->lockPurchaseOrder((int) $data['purchase_order_id'], $data) : null;
 
-            $total = BigDecimal::zero()->toScale(4);
-            foreach ($data['lines'] as $line) {
-                $this->assertLedger((int) $line['account_id'], 'lines.account_id', ['expense', 'asset']);
-                $lineTotal = AccountingDecimal::of($line['quantity'])->multipliedBy(AccountingDecimal::of($line['unit_amount']))->toScale(4, RoundingMode::HalfUp);
-                if (! $lineTotal->isPositive()) {
-                    throw ValidationException::withMessages(['lines' => 'Har bill line ki total amount zero se zyada honi chahiye.']);
-                }
-                $total = $total->plus($lineTotal);
-            }
+            $total = $this->lineTotal($data['lines']);
             $data = [...$data, ...$this->purchaseOrderLink($order, $data, $total)];
 
             $bill = PurchaseBill::query()->create([
@@ -63,13 +56,58 @@ class PurchaseBillService
                 'status' => PurchaseBillStatus::Draft,
                 'created_by' => $actor->id,
             ]);
-            foreach ($data['lines'] as $index => $line) {
-                $lineTotal = AccountingDecimal::of($line['quantity'])->multipliedBy(AccountingDecimal::of($line['unit_amount']))->toScale(4, RoundingMode::HalfUp);
-                $bill->lines()->create([...$line, 'purchase_order_line_id' => filled($line['purchase_order_line_id'] ?? null) ? (int) $line['purchase_order_line_id'] : null, 'line_number' => $index + 1, 'line_total' => AccountingDecimal::string($lineTotal)]);
-            }
+            $this->createLines($bill, $data['lines']);
             $this->audit->log('purchase_bills.created', $bill, ['branch_id' => $branch->id, 'vendor_id' => $bill->vendor_id, 'total_amount' => $bill->total_amount, 'purchase_order_id' => $bill->purchase_order_id, 'po_exception_status' => $bill->po_exception_status]);
 
             return $bill->load('lines');
+        }, 3);
+    }
+
+    /** @param array<string, mixed> $data */
+    public function update(PurchaseBill $bill, array $data, User $actor): PurchaseBill
+    {
+        abort_unless($actor->can('purchase_bills.update'), 403);
+
+        return DB::transaction(function () use ($bill, $data, $actor): PurchaseBill {
+            $header = PurchaseBill::query()->findOrFail($bill->id);
+            $this->guardBranch($header, $actor);
+            if ((int) ($data['purchase_order_id'] ?? 0) !== (int) ($header->purchase_order_id ?? 0)) {
+                throw ValidationException::withMessages(['purchase_order_id' => 'A linked purchase order cannot be changed while editing a bill.']);
+            }
+
+            $order = $header->purchase_order_id ? $this->lockPurchaseOrder($header->purchase_order_id, $data) : null;
+            $bill = PurchaseBill::query()->with(['branch', 'lines'])->lockForUpdate()->findOrFail($bill->id);
+            $this->guardBranch($bill, $actor);
+            if ($bill->status !== PurchaseBillStatus::Draft) {
+                throw ValidationException::withMessages(['status' => 'Only a draft purchase bill can be edited.']);
+            }
+            if ($bill->updated_at->format('Y-m-d H:i:s.u') !== $data['expected_updated_at']) {
+                throw ValidationException::withMessages(['status' => 'This draft was changed by another user. Reload it before saving your changes.']);
+            }
+            if (! Vendor::query()->whereKey($data['vendor_id'])->where('is_active', true)->exists()) {
+                throw ValidationException::withMessages(['vendor_id' => 'Select an active vendor.']);
+            }
+            if (blank($data['payable_account_id'] ?? null)) {
+                $data['payable_account_id'] = $this->mappings->payableForBills()->id;
+            }
+            $this->assertLedger((int) $data['payable_account_id'], 'payable_account_id', ['liability']);
+            $total = $this->lineTotal($data['lines']);
+            $data = [...$data, ...$this->purchaseOrderLink($order, $data, $total, $bill->id)];
+
+            $before = $this->auditSnapshot($bill);
+            $bill->lines()->delete();
+            $bill->update([
+                ...collect($data)->except(['lines', 'attachment', 'expected_updated_at'])->all(),
+                'total_amount' => AccountingDecimal::string($total),
+                'rejection_reason' => null,
+            ]);
+            $this->createLines($bill, $data['lines']);
+            $this->audit->log('purchase_bills.updated', $bill, [
+                'before' => $before,
+                'after' => $this->auditSnapshot($bill->fresh('lines')),
+            ], $actor);
+
+            return $bill->fresh('lines');
         }, 3);
     }
 
@@ -81,21 +119,26 @@ class PurchaseBillService
     public function approve(PurchaseBill $bill, User $actor): PurchaseBill
     {
         abort_unless($actor->is_active && $actor->can('purchase_bills.approve'), 403);
-        if (in_array($actor->id, [$bill->created_by, $bill->submitted_by], true)) {
-            throw ValidationException::withMessages(['approval' => 'Bill banane ya submit karne wala user apna bill approve nahi kar sakta.']);
-        }
+        $this->assertIndependentReviewer($bill, $actor, 'approve');
 
         $changes = ['approved_by' => $actor->id, 'approved_at' => now()];
         if ($bill->po_exception_status === 'pending') {
             // Billing beyond an approved purchase order is a financial authorization
             // decision, so it fails closed to Director authority.
-            if (! $actor->can('purchase_bills.approve_po_exception') || ! $this->authority->holdsDirectorRole($actor)) {
+            if (! $this->mayApprovePoException($actor)) {
                 $this->audit->log('purchase_bills.po_exception_denied', $bill, ['purchase_order_id' => $bill->purchase_order_id]);
                 abort(403, 'A bill that exceeds its purchase order needs Director approval.');
             }
             $changes = [...$changes, 'po_exception_status' => 'approved', 'po_exception_approved_by' => $actor->id, 'po_exception_approved_at' => now()];
         }
-        $bill = $this->transition($bill, $actor, 'purchase_bills.approve', PurchaseBillStatus::Submitted, PurchaseBillStatus::Approved, $changes);
+        $bill = $this->transition($bill, $actor, 'purchase_bills.approve', PurchaseBillStatus::Submitted, PurchaseBillStatus::Approved, $changes,
+            function (PurchaseBill $locked) use ($actor, $changes): void {
+                // Re-checked on the locked row: the actor is still eligible and the PO exception state is unchanged.
+                abort_unless($actor->is_active && $actor->can('purchase_bills.approve'), 403);
+                $this->assertIndependentReviewer($locked, $actor, 'approve');
+                $pending = $locked->po_exception_status === 'pending';
+                abort_if($pending !== isset($changes['po_exception_status']) || ($pending && ! $this->mayApprovePoException($actor)), 403, 'A bill that exceeds its purchase order needs Director approval.');
+            });
         if ($bill->po_exception_status === 'approved') {
             $this->audit->log('purchase_bills.po_exception_approved', $bill, ['purchase_order_id' => $bill->purchase_order_id, 'reason' => $bill->po_exception_reason]);
         }
@@ -106,11 +149,53 @@ class PurchaseBillService
     public function reject(PurchaseBill $bill, string $reason, User $actor): PurchaseBill
     {
         abort_unless($actor->is_active && $actor->can('purchase_bills.approve'), 403);
-        if (in_array($actor->id, [$bill->created_by, $bill->submitted_by], true)) {
-            throw ValidationException::withMessages(['approval' => 'Bill banane ya submit karne wala user apna bill reject nahi kar sakta.']);
-        }
+        $this->assertIndependentReviewer($bill, $actor, 'reject');
 
-        return $this->transition($bill, $actor, 'purchase_bills.approve', PurchaseBillStatus::Submitted, PurchaseBillStatus::Rejected, ['rejection_reason' => $reason]);
+        return $this->transition($bill, $actor, 'purchase_bills.approve', PurchaseBillStatus::Submitted, PurchaseBillStatus::Rejected, ['rejection_reason' => $reason],
+            function (PurchaseBill $locked) use ($actor): void {
+                abort_unless($actor->is_active && $actor->can('purchase_bills.approve'), 403);
+                $this->assertIndependentReviewer($locked, $actor, 'reject');
+            });
+    }
+
+    /** Whether the user may approve this bill now, for the screen. approve() checks everything again inside its lock. */
+    public function canApprove(PurchaseBill $bill, User $user): bool
+    {
+        return $this->canReturn($bill, $user)
+            && ($bill->po_exception_status !== 'pending' || $this->mayApprovePoException($user));
+    }
+
+    /** Whether the user may return this submitted bill for correction now, for the screen. */
+    public function canReturn(PurchaseBill $bill, User $user): bool
+    {
+        return $bill->status === PurchaseBillStatus::Submitted
+            && $user->is_active && $user->can('purchase_bills.approve')
+            && $this->branchAccess->canAccess($user, $bill->branch)
+            && ! in_array((int) $user->id, $this->preparerIds($bill), true);
+    }
+
+    /**
+     * Everyone who prepared the bill: its creator, its submitter and every user
+     * who edited the draft. None of them may approve or return it.
+     *
+     * @return list<int>
+     */
+    public function preparerIds(PurchaseBill $bill): array
+    {
+        return collect([$bill->created_by, $bill->submitted_by, ...$this->audit->actorIds($bill, ['purchase_bills.updated'])])
+            ->filter()->map(fn ($id): int => (int) $id)->unique()->values()->all();
+    }
+
+    private function assertIndependentReviewer(PurchaseBill $bill, User $actor, string $action): void
+    {
+        if (in_array((int) $actor->id, $this->preparerIds($bill), true)) {
+            throw ValidationException::withMessages(['approval' => "Bill banane, edit karne ya submit karne wala user apna bill {$action} nahi kar sakta."]);
+        }
+    }
+
+    private function mayApprovePoException(User $actor): bool
+    {
+        return $actor->can('purchase_bills.approve_po_exception') && $this->authority->holdsDirectorRole($actor);
     }
 
     public function post(PurchaseBill $bill, User $actor): PurchaseBill
@@ -122,6 +207,9 @@ class PurchaseBillService
             $this->guardBranch($bill, $actor);
             if ($bill->status !== PurchaseBillStatus::Approved || $bill->journal_entry_id) {
                 throw ValidationException::withMessages(['status' => 'Sirf approved aur unposted bill post ho sakta hai.']);
+            }
+            foreach ($bill->lines as $line) {
+                $this->debitAccountEligibility->assertEligible($line->account_id, 'lines.account_id');
             }
             $period = AccountingPeriod::query()->with('fiscalYear')->where('status', 'open')->whereDate('start_date', '<=', $bill->invoice_date)->whereDate('end_date', '>=', $bill->invoice_date)->first();
             if (! $period || $period->fiscalYear->status->value !== 'open') {
@@ -170,16 +258,22 @@ class PurchaseBillService
         }, 3);
     }
 
-    /** @param array<string, mixed> $changes */
-    private function transition(PurchaseBill $bill, User $actor, string $permission, PurchaseBillStatus $from, PurchaseBillStatus $to, array $changes): PurchaseBill
+    /**
+     * @param  array<string, mixed>  $changes
+     * @param  (callable(PurchaseBill): void)|null  $guard  extra checks on the locked row, before anything changes
+     */
+    private function transition(PurchaseBill $bill, User $actor, string $permission, PurchaseBillStatus $from, PurchaseBillStatus $to, array $changes, ?callable $guard = null): PurchaseBill
     {
         abort_unless($actor->can($permission), 403);
 
-        return DB::transaction(function () use ($bill, $actor, $from, $to, $changes): PurchaseBill {
+        return DB::transaction(function () use ($bill, $actor, $from, $to, $changes, $guard): PurchaseBill {
             $bill = PurchaseBill::query()->with('branch')->lockForUpdate()->findOrFail($bill->id);
             $this->guardBranch($bill, $actor);
             if ($bill->status !== $from) {
                 throw ValidationException::withMessages(['status' => 'Bill is workflow step ke liye eligible nahi.']);
+            }
+            if ($guard) {
+                $guard($bill);
             }
             $bill->update([...$changes, 'status' => $to]);
             $this->audit->log('purchase_bills.'.$to->value, $bill, ['from_status' => $from->value, 'total_amount' => $bill->total_amount]);
@@ -210,7 +304,7 @@ class PurchaseBillService
      * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
-    private function purchaseOrderLink(?PurchaseOrder $order, array $data, BigDecimal $total): array
+    private function purchaseOrderLink(?PurchaseOrder $order, array $data, BigDecimal $total, ?int $excludingBillId = null): array
     {
         if (! $order) {
             if (collect($data['lines'])->contains(fn (array $line): bool => filled($line['purchase_order_line_id'] ?? null))) {
@@ -221,7 +315,7 @@ class PurchaseBillService
         }
 
         // Locking reads: plain reads could miss bills committed while this transaction waited for the order.
-        $activeBills = $order->activeBills()->lockForUpdate()->get(['id', 'total_amount']);
+        $activeBills = $order->activeBills()->when($excludingBillId, fn ($query) => $query->whereKeyNot($excludingBillId))->lockForUpdate()->get(['id', 'total_amount']);
         $billed = $activeBills->reduce(fn (BigDecimal $sum, PurchaseBill $bill): BigDecimal => $sum->plus(AccountingDecimal::of($bill->total_amount)), BigDecimal::zero()->toScale(4));
         $billedLines = PurchaseBillLine::query()->whereIn('purchase_bill_id', $activeBills->pluck('id'))->whereNotNull('purchase_order_line_id')->lockForUpdate()->get(['id', 'purchase_order_line_id', 'quantity']);
         $exceeds = $billed->plus($total)->isGreaterThan(AccountingDecimal::of($order->total_amount));
@@ -262,6 +356,49 @@ class PurchaseBillService
         if (! Account::query()->whereKey($id)->whereIn('account_type', $types)->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->exists()) {
             throw ValidationException::withMessages([$field => 'Active postable ledger account required hai.']);
         }
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function lineTotal(array $lines): BigDecimal
+    {
+        $total = BigDecimal::zero()->toScale(4);
+        foreach ($lines as $line) {
+            $this->debitAccountEligibility->assertEligible((int) $line['account_id'], 'lines.account_id');
+            $lineTotal = AccountingDecimal::of($line['quantity'])->multipliedBy(AccountingDecimal::of($line['unit_amount']))->toScale(4, RoundingMode::HalfUp);
+            if (! $lineTotal->isPositive()) {
+                throw ValidationException::withMessages(['lines' => 'Har bill line ki total amount zero se zyada honi chahiye.']);
+            }
+            $total = $total->plus($lineTotal);
+        }
+
+        return $total;
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function createLines(PurchaseBill $bill, array $lines): void
+    {
+        foreach ($lines as $index => $line) {
+            $lineTotal = AccountingDecimal::of($line['quantity'])->multipliedBy(AccountingDecimal::of($line['unit_amount']))->toScale(4, RoundingMode::HalfUp);
+            $bill->lines()->create([...$line, 'purchase_order_line_id' => filled($line['purchase_order_line_id'] ?? null) ? (int) $line['purchase_order_line_id'] : null, 'line_number' => $index + 1, 'line_total' => AccountingDecimal::string($lineTotal)]);
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function auditSnapshot(PurchaseBill $bill): array
+    {
+        return [
+            'vendor_id' => $bill->vendor_id,
+            'branch_id' => $bill->branch_id,
+            'payable_account_id' => $bill->payable_account_id,
+            'bill_number' => $bill->bill_number,
+            'invoice_date' => $bill->invoice_date->toDateString(),
+            'due_date' => $bill->due_date?->toDateString(),
+            'purchase_order_id' => $bill->purchase_order_id,
+            'description' => $bill->description,
+            'attachment_path' => $bill->attachment_path,
+            'total_amount' => $bill->total_amount,
+            'lines' => $bill->lines->map(fn (PurchaseBillLine $line): array => $line->only(['account_id', 'service_id', 'description', 'quantity', 'unit_amount', 'line_total', 'purchase_order_line_id']))->values()->all(),
+        ];
     }
 
     private function guardBranch(PurchaseBill $bill, User $actor): void

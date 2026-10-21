@@ -9,12 +9,13 @@ use App\Enums\FinancialStatement;
 use App\Enums\NormalBalance;
 use Database\Factories\AccountFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['code', 'name', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'financial_account_type', 'is_postable', 'is_active', 'description', 'sort_order', 'created_by'])]
+#[Fillable(['code', 'name', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'financial_account_type', 'purchase_bill_debit_eligible', 'is_postable', 'is_active', 'description', 'sort_order', 'created_by'])]
 class Account extends Model
 {
     /** @use HasFactory<AccountFactory> */
@@ -28,6 +29,7 @@ class Account extends Model
             'normal_balance' => NormalBalance::class,
             'financial_statement' => FinancialStatement::class,
             'financial_account_type' => FinancialAccountType::class,
+            'purchase_bill_debit_eligible' => 'boolean',
             'is_postable' => 'boolean',
             'is_active' => 'boolean',
         ];
@@ -61,5 +63,27 @@ class Account extends Model
     public function financialAccounts(): HasMany
     {
         return $this->hasMany(FinancialAccount::class);
+    }
+
+    /** @param Builder<Account> $query */
+    public function scopeEligibleForPurchaseBillDebit(Builder $query): void
+    {
+        $query->where('purchase_bill_debit_eligible', true)
+            ->where('level', AccountLevel::Ledger->value)
+            ->where('is_postable', true)
+            ->where('is_active', true)
+            ->whereNull('financial_account_type')
+            ->whereDoesntHave('financialAccounts')
+            ->where(function (Builder $query): void {
+                $query->where(function (Builder $query): void {
+                    $query->where('account_type', AccountType::Expense->value)
+                        ->where('normal_balance', NormalBalance::Debit->value)
+                        ->where('financial_statement', FinancialStatement::IncomeExpenditure->value);
+                })->orWhere(function (Builder $query): void {
+                    $query->where('account_type', AccountType::Asset->value)
+                        ->where('normal_balance', NormalBalance::Debit->value)
+                        ->where('financial_statement', FinancialStatement::BalanceSheet->value);
+                });
+            });
     }
 }

@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Models\FinancialAccount;
 use App\Models\JournalLine;
 use App\Models\OperationalTransaction;
+use App\Models\PayableObligation;
 use App\Models\PurchaseBill;
 use App\Models\Vendor;
 use App\Services\AccountingDecimal;
@@ -97,9 +98,10 @@ class OperationalReportController extends Controller
         abort_unless($request->user()->can('finance_reports.view'), 403);
         $asOf = $request->date('as_of') ?? today();
         $bills = $this->outstandingBills($request, $access, $asOf);
-        $aging = $this->aging($bills, $asOf);
+        $obligations = $this->outstandingObligations($request, $access, $asOf);
+        $aging = $this->aging($bills, $obligations, $asOf);
 
-        return view('accounting.reports.payables', compact('bills', 'aging', 'asOf'));
+        return view('accounting.reports.payables', compact('bills', 'obligations', 'aging', 'asOf'));
     }
 
     public function exportPayables(Request $request, BranchAccess $access, LedgerReportTables $tables, ReportExporter $exporter, string $format): StreamedResponse|RedirectResponse
@@ -107,12 +109,13 @@ class OperationalReportController extends Controller
         $this->authorizeFinanceExport($request);
         $asOf = $request->date('as_of') ?? today();
         $bills = $this->outstandingBills($request, $access, $asOf);
-        if ($bills->isEmpty()) {
+        $obligations = $this->outstandingObligations($request, $access, $asOf);
+        if ($bills->isEmpty() && $obligations->isEmpty()) {
             return redirect()->route('reports.payables', $request->query())->with('error', 'There are no outstanding posted payables to export.');
         }
 
         return $exporter->download(
-            $tables->payables($bills, $this->aging($bills, $asOf), fn (PurchaseBill $bill): string => $this->agingBucket($bill, $asOf), ['As of' => $asOf->format('d M Y'), 'Branch' => 'All authorized branches']),
+            $tables->payables($bills, $obligations, $this->aging($bills, $obligations, $asOf), fn (PurchaseBill $bill): string => $this->agingBucket($bill, $asOf), fn (PayableObligation $obligation): string => $this->obligationAgingBucket($obligation, $asOf), ['As of' => $asOf->format('d M Y'), 'Branch' => 'All authorized branches']),
             $format,
             'payables-aging-'.$asOf->toDateString(),
         );
@@ -205,17 +208,44 @@ class OperationalReportController extends Controller
     /** @return Collection<int, PurchaseBill> */
     private function outstandingBills(Request $request, BranchAccess $access, CarbonInterface $asOf): Collection
     {
-        return PurchaseBill::query()->with(['vendor', 'branch', 'payments'])->where('status', 'posted')->whereDate('invoice_date', '<=', $asOf)->whereIn('branch_id', $access->scope($request->user())->select('id'))->orderBy('due_date')->get()->filter(fn (PurchaseBill $bill) => AccountingDecimal::of($bill->outstandingAmount())->isPositive());
+        return PurchaseBill::query()->with(['vendor', 'branch', 'payments'])->where('status', 'posted')->whereDate('invoice_date', '<=', $asOf)->whereIn('branch_id', $access->scope($request->user())->select('id'))->orderBy('due_date')->get()
+            ->map(function (PurchaseBill $bill) use ($asOf): PurchaseBill {
+                $paid = $bill->payments->filter(fn (OperationalTransaction $payment): bool => $payment->status === OperationalTransactionStatus::Posted && $payment->transaction_date->lessThanOrEqualTo($asOf))
+                    ->reduce(fn (BigDecimal $sum, OperationalTransaction $payment): BigDecimal => $sum->plus(AccountingDecimal::of($payment->amount)), BigDecimal::zero()->toScale(4));
+                $bill->setAttribute('report_outstanding', AccountingDecimal::string(AccountingDecimal::of($bill->total_amount)->minus($paid)));
+
+                return $bill;
+            })->filter(fn (PurchaseBill $bill): bool => AccountingDecimal::of($bill->getAttribute('report_outstanding'))->isPositive())->values();
+    }
+
+    /** @return Collection<int, PayableObligation> */
+    private function outstandingObligations(Request $request, BranchAccess $access, CarbonInterface $asOf): Collection
+    {
+        return PayableObligation::query()->with(['vendor', 'branch', 'sourceExpense'])
+            ->whereDate('obligation_date', '<=', $asOf)
+            ->whereIn('branch_id', $access->scope($request->user())->select('id'))
+            ->whereHas('sourceExpense', fn (Builder $query) => $query->where('status', OperationalTransactionStatus::Posted->value))
+            ->orderBy('obligation_date')->get()
+            ->map(function (PayableObligation $obligation) use ($asOf): PayableObligation {
+                $obligation->setAttribute('report_outstanding', $obligation->outstandingAmount($asOf));
+
+                return $obligation;
+            })->filter(fn (PayableObligation $obligation): bool => AccountingDecimal::of($obligation->getAttribute('report_outstanding'))->isPositive())->values();
     }
 
     /**
      * @param  Collection<int, PurchaseBill>  $bills
+     * @param  Collection<int, PayableObligation>  $obligations
      * @return Collection<string, BigDecimal>
      */
-    private function aging(Collection $bills, CarbonInterface $asOf): Collection
+    private function aging(Collection $bills, Collection $obligations, CarbonInterface $asOf): Collection
     {
-        return $bills->groupBy(fn (PurchaseBill $bill): string => $this->agingBucket($bill, $asOf))
-            ->map(fn (Collection $items) => $items->reduce(fn (BigDecimal $sum, PurchaseBill $bill) => $sum->plus(AccountingDecimal::of($bill->outstandingAmount())), BigDecimal::zero()->toScale(4)));
+        $billAging = $bills->groupBy(fn (PurchaseBill $bill): string => $this->agingBucket($bill, $asOf))
+            ->map(fn (Collection $items) => $items->reduce(fn (BigDecimal $sum, PurchaseBill $bill) => $sum->plus(AccountingDecimal::of($bill->getAttribute('report_outstanding'))), BigDecimal::zero()->toScale(4)));
+        $obligationAging = $obligations->groupBy(fn (PayableObligation $obligation): string => $this->obligationAgingBucket($obligation, $asOf))
+            ->map(fn (Collection $items) => $items->reduce(fn (BigDecimal $sum, PayableObligation $obligation) => $sum->plus(AccountingDecimal::of($obligation->getAttribute('report_outstanding'))), BigDecimal::zero()->toScale(4)));
+
+        return collect(['Current', '1-30', '31-60', '61-90', '90+'])->mapWithKeys(fn (string $bucket): array => [$bucket => AccountingDecimal::of($billAging->get($bucket) ?? '0')->plus(AccountingDecimal::of($obligationAging->get($bucket) ?? '0'))]);
     }
 
     private function agingBucket(PurchaseBill $bill, CarbonInterface $asOf): string
@@ -224,6 +254,15 @@ class OperationalReportController extends Controller
 
         return match (true) {
             $days <= 0 => 'Current', $days <= 30 => '1-30', $days <= 60 => '31-60', $days <= 90 => '61-90', default => '90+'
+        };
+    }
+
+    private function obligationAgingBucket(PayableObligation $obligation, CarbonInterface $asOf): string
+    {
+        $days = $obligation->obligation_date->diffInDays($asOf, false);
+
+        return match (true) {
+            $days <= 0 => 'Current', $days <= 30 => '1-30', $days <= 60 => '31-60', $days <= 90 => '61-90', default => '90+',
         };
     }
 }

@@ -313,7 +313,7 @@ test('nothing is offered or exported when there is no data', function () {
 
 test('receipt register cash book and payables exports carry correct totals within the branch scope', function () {
     $payable = Account::factory()->create(['code' => '211101', 'account_type' => 'liability', 'normal_balance' => 'credit']);
-    $expense = Account::factory()->create(['code' => '511101', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $expense = Account::factory()->create(['code' => '511101', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
     $operations = app(OperationalTransactionService::class);
     $this->actingAs($this->maker);
     $ownCash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch->id, 'account_id' => $this->cashLedger->id]);

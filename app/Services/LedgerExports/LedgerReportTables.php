@@ -6,6 +6,7 @@ use App\Enums\AccountLevel;
 use App\Enums\OperationalTransactionStatus;
 use App\Models\JournalLine;
 use App\Models\OperationalTransaction;
+use App\Models\PayableObligation;
 use App\Models\PurchaseBill;
 use App\Services\AccountingDecimal;
 use App\Services\Reports\ReportTable;
@@ -206,16 +207,18 @@ class LedgerReportTables
 
     /**
      * @param  Collection<int, PurchaseBill>  $bills  Outstanding posted bills, as shown on the screen.
+     * @param  Collection<int, PayableObligation>  $obligations  Outstanding accrued expenses, as shown on the screen.
      * @param  Collection<string, BigDecimal>  $aging  Outstanding total per aging bucket, as shown on the screen.
      * @param  callable(PurchaseBill): string  $bucket
+     * @param  callable(PayableObligation): string  $obligationBucket
      * @param  array<string, string>  $meta
      */
-    public function payables(Collection $bills, Collection $aging, callable $bucket, array $meta): ReportTable
+    public function payables(Collection $bills, Collection $obligations, Collection $aging, callable $bucket, callable $obligationBucket, array $meta): ReportTable
     {
         $total = BigDecimal::zero()->toScale(4);
         $rows = [];
         foreach ($bills as $bill) {
-            $outstanding = AccountingDecimal::of($bill->outstandingAmount());
+            $outstanding = AccountingDecimal::of($bill->getAttribute('report_outstanding') ?? $bill->outstandingAmount());
             $total = $total->plus($outstanding);
             $rows[] = [
                 'vendor' => $bill->vendor->name,
@@ -223,6 +226,19 @@ class LedgerReportTables
                 'due' => $bill->due_date?->format('d M Y') ?? '',
                 'branch' => $bill->branch->name,
                 'aging' => $bucket($bill),
+                'outstanding' => AccountingDecimal::string($outstanding),
+            ];
+        }
+        foreach ($obligations as $obligation) {
+            $outstanding = AccountingDecimal::of($obligation->getAttribute('report_outstanding') ?? $obligation->outstandingAmount());
+            $total = $total->plus($outstanding);
+            $sourceReference = $obligation->sourceExpense?->reference_number ?: $obligation->source_reference;
+            $rows[] = [
+                'vendor' => $obligation->vendor?->name ?? 'Unassigned vendor',
+                'bill' => 'Accrued expense #'.$obligation->source_expense_transaction_id.($sourceReference ? ' - '.$sourceReference : ''),
+                'due' => $obligation->obligation_date->format('d M Y'),
+                'branch' => $obligation->branch->name,
+                'aging' => $obligationBucket($obligation),
                 'outstanding' => AccountingDecimal::string($outstanding),
             ];
         }
@@ -240,7 +256,12 @@ class LedgerReportTables
             ['key' => 'branch', 'label' => 'Branch'],
             ['key' => 'aging', 'label' => 'Aging (days)'],
             ['key' => 'outstanding', 'label' => 'Outstanding', 'type' => 'money'],
-        ], $rows, $meta, 'Posted bills less posted payments.');
+        ], $rows, $meta, 'Posted purchase bills and accrued expenses, less posted settlements.', [
+            // Long vendor/source/branch values need real row heights in the PDF only.
+            'wrap_rows' => true,
+            'line_height' => 10,
+            'cell_padding' => 4,
+        ]);
     }
 
     /** Posted payments against a bill, from the already loaded relation. */

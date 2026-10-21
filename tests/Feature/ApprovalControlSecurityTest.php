@@ -37,7 +37,7 @@ beforeEach(function () {
     $this->approver = controlUser(SystemRole::Approver, $this->branch);
     $this->director = controlUser(SystemRole::Director, $this->branch);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => Account::factory()]);
-    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
     $this->payable = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->actingAs($this->maker);
 });

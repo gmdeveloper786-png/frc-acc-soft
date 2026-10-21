@@ -14,6 +14,7 @@ final class ReportTable
      *                                            decimal strings. Optional keys: `_style` (`heading`, `subtotal` or `total`)
      *                                            and `_indent` (hierarchy depth, applied to the first column).
      * @param  array<string, string>  $meta  Filters shown under the title, e.g. `['Branch' => 'Lahore', 'As of' => '31 Jan 2026']`.
+     * @param  array{wrap_rows?: bool, line_height?: float, cell_padding?: float}  $pdfOptions  Per-report PDF layout options.
      */
     public function __construct(
         public readonly string $title,
@@ -21,5 +22,6 @@ final class ReportTable
         public readonly array $rows,
         public readonly array $meta = [],
         public readonly ?string $note = null,
+        public readonly array $pdfOptions = [],
     ) {}
 }

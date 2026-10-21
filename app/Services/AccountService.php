@@ -14,12 +14,15 @@ use Illuminate\Validation\ValidationException;
 
 class AccountService
 {
-    public function __construct(private AuditLogger $audit) {}
+    public function __construct(
+        private AuditLogger $audit,
+    ) {}
 
     /** @param array<string, mixed> $data */
     public function create(array $data, User $actor): Account
     {
         $this->validateHierarchy($data);
+        $this->validatePurchaseBillDebitEligibility($data);
 
         return DB::transaction(function () use ($data, $actor): Account {
             $account = Account::query()->create([...$data, 'created_by' => $actor->id]);
@@ -33,10 +36,11 @@ class AccountService
     public function update(Account $account, array $data): Account
     {
         $this->validateHierarchy($data, $account);
+        $this->validatePurchaseBillDebitEligibility($data, $account);
         $this->guardReferencedClassification($account, $data);
 
         return DB::transaction(function () use ($account, $data): Account {
-            $before = $account->only(['code', 'name', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'is_postable', 'is_active']);
+            $before = $account->only(['code', 'name', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'financial_account_type', 'purchase_bill_debit_eligible', 'is_postable', 'is_active']);
             $account->update($data);
             $this->audit->log('account.updated', $account, ['before' => $before, 'after' => $account->fresh()->only(array_keys($before))]);
 
@@ -46,6 +50,9 @@ class AccountService
 
     public function setActive(Account $account, bool $active): void
     {
+        if ($active) {
+            $this->validatePurchaseBillDebitEligibility(['is_active' => true], $account);
+        }
         $account->update(['is_active' => $active]);
         $this->audit->log($active ? 'account.activated' : 'account.deactivated', $account, ['code' => $account->code]);
     }
@@ -136,6 +143,40 @@ class AccountService
         }
         if ($referenced) {
             throw ValidationException::withMessages(['account' => 'Referenced accounts cannot have their accounting classification or hierarchy changed.']);
+        }
+    }
+
+    /** @param array<string, mixed> $data */
+    private function validatePurchaseBillDebitEligibility(array $data, ?Account $account = null): void
+    {
+        $eligible = (bool) ($data['purchase_bill_debit_eligible'] ?? $account?->purchase_bill_debit_eligible ?? false);
+        if (! $eligible) {
+            return;
+        }
+
+        $attributes = [
+            'account_type' => $data['account_type'] ?? $account?->account_type?->value,
+            'level' => $data['level'] ?? $account?->level?->value,
+            'normal_balance' => $data['normal_balance'] ?? $account?->normal_balance?->value,
+            'financial_statement' => $data['financial_statement'] ?? $account?->financial_statement?->value,
+            'financial_account_type' => $data['financial_account_type'] ?? $account?->financial_account_type?->value,
+            'is_postable' => $data['is_postable'] ?? $account?->is_postable,
+            'is_active' => $data['is_active'] ?? $account?->is_active,
+        ];
+        $isExpense = $attributes['account_type'] === AccountType::Expense->value
+            && $attributes['financial_statement'] === FinancialStatement::IncomeExpenditure->value;
+        $isAsset = $attributes['account_type'] === AccountType::Asset->value
+            && $attributes['financial_statement'] === FinancialStatement::BalanceSheet->value;
+        if ($attributes['level'] !== AccountLevel::Ledger->value
+            || $attributes['normal_balance'] !== NormalBalance::Debit->value
+            || ! ($attributes['is_postable'] ?? false)
+            || ! ($attributes['is_active'] ?? false)
+            || filled($attributes['financial_account_type'])
+            || (! $isExpense && ! $isAsset)
+            || ($account && $account->financialAccounts()->exists())) {
+            throw ValidationException::withMessages([
+                'purchase_bill_debit_eligible' => 'Purchase Bill debit eligibility sirf active, postable debit-normal Expense ya Asset ledger ke liye hai. Cash aur bank ledgers eligible nahi ho sakte.',
+            ]);
         }
     }
 }

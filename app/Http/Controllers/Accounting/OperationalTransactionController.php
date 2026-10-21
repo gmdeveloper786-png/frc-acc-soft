@@ -44,8 +44,13 @@ class OperationalTransactionController extends Controller
     {
         $type = OperationalTransactionType::tryFrom((string) $request->route('type')) ?? abort(404);
         abort_unless($request->user()->can($type->permissionPrefix().'.create'), 403);
+        $data = $this->formData($request, $access);
+        // A vendor payment opened from a bill (?bill=) or re-shown after a validation error starts on that bill,
+        // but only if it is one of the posted bills this user may pay.
+        $billId = (int) $request->old('purchase_bill_id', $request->query('bill'));
+        $selectedBill = $type === OperationalTransactionType::VendorPayment ? $data['bills']->firstWhere('id', $billId) : null;
 
-        return view('accounting.transactions.create', [...$this->formData($request, $access), 'type' => $type]);
+        return view('accounting.transactions.create', [...$data, 'type' => $type, 'selectedBill' => $selectedBill]);
     }
 
     public function store(StoreOperationalTransactionRequest $request, OperationalTransactionService $service): RedirectResponse
@@ -62,16 +67,20 @@ class OperationalTransactionController extends Controller
     public function show(Request $request, OperationalTransaction $transaction, BranchAccess $access, OperationalTransactionService $service): View
     {
         abort_unless($request->user()->can($transaction->type->permissionPrefix().'.view') && $access->canAccess($request->user(), $transaction->branch), 403);
-        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory', 'purchaseBill', 'journalEntry', 'creator', 'approver']);
+        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory', 'purchaseBill', 'payableObligation', 'accruedPayableObligation', 'journalEntry', 'creator', 'approver']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
+        $defaultReversalDate = today()->toDateString();
+        $defaultReversalPeriodId = $openPeriods->first(fn (AccountingPeriod $period): bool => $defaultReversalDate >= $period->start_date->toDateString() && $defaultReversalDate <= $period->end_date->toDateString())?->id;
 
         $canApprove = $service->canApprove($transaction, $request->user());
 
         $canReject = $service->canReject($transaction, $request->user());
+        $canPost = $service->canPost($transaction, $request->user());
+        $hasActivePayableSettlements = $service->hasActivePayableSettlementsForSource($transaction);
 
         $splitWarning = app(SplitPaymentDetector::class)->analyze($transaction);
 
-        return view('accounting.transactions.show', compact('transaction', 'openPeriods', 'canApprove', 'canReject', 'splitWarning'));
+        return view('accounting.transactions.show', compact('transaction', 'openPeriods', 'defaultReversalDate', 'defaultReversalPeriodId', 'canApprove', 'canReject', 'canPost', 'splitWarning', 'hasActivePayableSettlements'));
     }
 
     public function submit(Request $request, OperationalTransaction $transaction, OperationalTransactionService $service): RedirectResponse
@@ -145,7 +154,7 @@ class OperationalTransactionController extends Controller
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
             'donationCategories' => DonationCategory::query()->with('fund')->where('is_active', true)->orderBy('name')->get(),
             'funds' => Fund::query()->active()->orderBy('code')->get(),
-            'bills' => PurchaseBill::query()->with(['vendor', 'postedPayments'])->whereIn('branch_id', $branchIds)->where('status', 'posted')->orderByDesc('invoice_date')->get(),
+            'bills' => PurchaseBill::query()->with(['vendor', 'branch', 'postedPayments'])->whereIn('branch_id', $branchIds)->where('status', 'posted')->orderByDesc('invoice_date')->get(),
         ];
     }
 }

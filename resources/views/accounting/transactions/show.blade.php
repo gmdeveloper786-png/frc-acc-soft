@@ -4,7 +4,29 @@
 @if(in_array($transaction->status->value,['draft','rejected']) && $transaction->type->requiresApproval()) @can($transaction->type->permissionPrefix().'.submit')<form method="POST" action="{{ route('transactions.submit',$transaction) }}">@csrf<button class="btn btn-primary w-100">Submit for approval</button></form>@endcan @endif
 @if($transaction->status->value==='submitted') @if($canApprove)<form method="POST" action="{{ route('transactions.approve',$transaction) }}">@csrf<button class="btn btn-success w-100" data-confirm="Approve this transaction?">Approve</button></form>@elseif($transaction->approval_tier==='director')<span class="status-badge pending">Awaiting Director approval</span>@endif @if($canReject)<form method="POST" action="{{ route('transactions.reject',$transaction) }}">@csrf<textarea class="form-control mb-2" name="reason" placeholder="Rejection reason" required></textarea><button class="btn btn-outline-danger w-100">Return for correction</button></form>@endif @endif
 @if($transaction->status->value==='approved' && ($transaction->type->requiresDisbursement() || ($transaction->type->value==='expense' && $transaction->settlement_type==='paid'))) @can($transaction->type->permissionPrefix().'.disburse')<form method="POST" action="{{ route('transactions.disburse',$transaction) }}">@csrf<button class="btn btn-warning w-100" data-confirm="Confirm actual disbursement?">Confirm disbursement</button></form>@endcan @endif
-@php($postable=in_array($transaction->status->value,['draft','approved','disbursed'])) @if($postable) @can($transaction->type->permissionPrefix().'.post')<form method="POST" action="{{ route('transactions.post',$transaction) }}">@csrf<button class="btn btn-primary w-100" data-confirm="Post balanced journal entry?">Post to Journal Engine</button></form>@endcan @endif
-@if($transaction->status->value==='posted') @can($transaction->type->permissionPrefix().'.reverse')<form method="POST" action="{{ route('transactions.reverse',$transaction) }}">@csrf<select class="form-select mb-2" name="accounting_period_id" required>@foreach($openPeriods as $period)<option value="{{ $period->id }}">{{ $period->name }}</option>@endforeach</select><input class="form-control mb-2" type="date" name="transaction_date" value="{{ today()->toDateString() }}" required><textarea class="form-control mb-2" name="reason" placeholder="Reversal reason" required></textarea><button class="btn btn-outline-danger w-100" data-confirm="Create and post reversing journal?">Reverse</button></form>@endcan @endif
+@if($canPost)<form method="POST" action="{{ route('transactions.post',$transaction) }}">@csrf<button class="btn btn-primary w-100" data-confirm="Post balanced journal entry?">Post to Journal Engine</button></form>@endif
+@if($transaction->status->value==='posted') @if($hasActivePayableSettlements)<div class="alert alert-warning mb-0">Reverse linked payable settlements before reversing this expense.</div>@else @can($transaction->type->permissionPrefix().'.reverse')<form method="POST" action="{{ route('transactions.reverse',$transaction) }}">@csrf<select class="form-select mb-2" id="reversal-period" name="accounting_period_id" required><option value="">Select open period for reversal date</option>@foreach($openPeriods as $period)<option value="{{ $period->id }}" data-start-date="{{ $period->start_date->toDateString() }}" data-end-date="{{ $period->end_date->toDateString() }}" @selected($defaultReversalPeriodId === $period->id)>{{ $period->name }}</option>@endforeach</select><input class="form-control mb-2" id="reversal-date" type="date" name="transaction_date" value="{{ $defaultReversalDate }}" required><div class="form-text mb-2 d-none" id="reversal-period-help">Select an open accounting period that contains the reversal date.</div><textarea class="form-control mb-2" name="reason" placeholder="Reversal reason" required></textarea><button class="btn btn-outline-danger w-100" data-confirm="Create and post reversing journal?">Reverse</button></form>@endcan @endif @endif
+@if($transaction->type === \App\Enums\OperationalTransactionType::Expense && $transaction->settlement_type === 'accrued' && $transaction->status->value === 'posted' && $transaction->accruedPayableObligation && \App\Services\AccountingDecimal::of($transaction->accruedPayableObligation->outstandingAmount())->isPositive()) @can('payments.create')<a class="btn btn-outline-primary" href="{{ route('payable-obligations.settle.create', $transaction->accruedPayableObligation) }}">Settle payable</a>@endcan @endif
 @if(in_array($transaction->type->value, ['donation', 'cash_receipt', 'bank_receipt'], true) && $transaction->status->value==='posted')<a class="btn btn-outline-primary" href="{{ route('transactions.acknowledgment',$transaction) }}">{{ $transaction->type->value==='donation' ? 'Print acknowledgment' : 'Print receipt' }}</a>@endif
-</div></div></div></div></div>@endsection
+</div></div></div></div></div>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const date = document.getElementById('reversal-date');
+    const period = document.getElementById('reversal-period');
+    const help = document.getElementById('reversal-period-help');
+
+    if (!date || !period || !help) {
+        return;
+    }
+
+    const syncPeriod = () => {
+        const selected = Array.from(period.options).find((option) => option.dataset.startDate <= date.value && option.dataset.endDate >= date.value);
+        period.value = selected?.value ?? '';
+        help.classList.toggle('d-none', selected !== undefined);
+    };
+
+    date.addEventListener('change', syncPeriod);
+    syncPeriod();
+});
+</script>
+@endsection

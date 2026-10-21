@@ -30,7 +30,7 @@ beforeEach(function () {
     $this->approver = poUser(SystemRole::Approver, $this->branch);
     $this->director = poUser(SystemRole::Director, $this->branch);
     $this->vendor = Vendor::factory()->create();
-    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
     $this->payable = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->actingAs($this->maker);
 });
@@ -354,4 +354,93 @@ test('screens enforce permissions and mass assignment cannot set workflow fields
     $this->get(route('purchase-orders.index', ['status' => 'approved']))->assertOk()->assertSee('No purchase orders found');
     $this->get(route('purchase-orders.edit', $order))->assertOk()->assertSee('Therapy mats');
     $this->actingAs(poUser(SystemRole::Cashier, $this->branch))->get(route('purchase-orders.show', $order))->assertForbidden();
+});
+
+test('an authorized user can edit a draft purchase bill without creating a journal', function () {
+    $service = app(PurchaseBillService::class);
+    $bill = $service->create([
+        'vendor_id' => $this->vendor->id,
+        'branch_id' => $this->branch->id,
+        'payable_account_id' => $this->payable->id,
+        'bill_number' => 'PB-EDIT-001',
+        'invoice_date' => '2026-01-15',
+        'description' => 'Original draft',
+        'lines' => [['account_id' => $this->expense->id, 'description' => 'Original line', 'quantity' => '1.0000', 'unit_amount' => '100.0000']],
+    ], $this->maker);
+
+    $this->get(route('purchase-bills.edit', $bill))->assertOk()->assertSee('Save draft changes');
+    $this->put(route('purchase-bills.update', $bill), [
+        'vendor_id' => $this->vendor->id,
+        'branch_id' => $this->branch->id,
+        'payable_account_id' => $this->payable->id,
+        'bill_number' => 'PB-EDIT-001',
+        'invoice_date' => '2026-01-16',
+        'description' => 'Corrected draft',
+        'expected_updated_at' => $bill->updated_at->format('Y-m-d H:i:s.u'),
+        'lines' => [['account_id' => $this->expense->id, 'description' => 'Corrected line', 'quantity' => '2.0000', 'unit_amount' => '100.0000']],
+    ])->assertRedirect(route('purchase-bills.show', $bill));
+
+    expect($bill->fresh()->status)->toBe(PurchaseBillStatus::Draft)
+        ->and($bill->fresh()->total_amount)->toBe('200.0000')
+        ->and($bill->fresh()->description)->toBe('Corrected draft')
+        ->and($bill->fresh()->lines)->toHaveCount(1)
+        ->and(JournalEntry::query()->count())->toBe(0)
+        ->and(AuditLog::query()->where('event', 'purchase_bills.updated')->exists())->toBeTrue();
+});
+
+test('the purchase bill listing renders draft and non-draft bills with edit offered only on drafts', function () {
+    $service = app(PurchaseBillService::class);
+    $bill = fn (string $number) => $service->create([
+        'vendor_id' => $this->vendor->id,
+        'branch_id' => $this->branch->id,
+        'payable_account_id' => $this->payable->id,
+        'bill_number' => $number,
+        'invoice_date' => '2026-01-15',
+        'lines' => [['account_id' => $this->expense->id, 'description' => 'Listing line', 'quantity' => '1.0000', 'unit_amount' => '100.0000']],
+    ], $this->maker);
+    $draft = $bill('PB-LIST-DRAFT');
+    $submitted = $bill('PB-LIST-SUBMITTED');
+    $submitted->update(['status' => PurchaseBillStatus::Submitted]);
+
+    $this->get(route('purchase-bills.index'))->assertOk()
+        ->assertSee(['PB-LIST-DRAFT', 'PB-LIST-SUBMITTED', 'draft', 'submitted'])
+        ->assertSee(route('purchase-bills.show', $draft), false)
+        ->assertSee(route('purchase-bills.show', $submitted), false)
+        ->assertSee(route('purchase-bills.edit', $draft), false)
+        ->assertDontSee(route('purchase-bills.edit', $submitted), false);
+
+    // A viewer without purchase_bills.update sees the bills but no Edit action.
+    $this->actingAs($this->approver)->get(route('purchase-bills.index'))->assertOk()
+        ->assertSee(['PB-LIST-DRAFT', 'PB-LIST-SUBMITTED'])
+        ->assertDontSee(route('purchase-bills.edit', $draft), false);
+});
+
+test('purchase bill edit rejects stale, unauthorized, non-draft, and ineligible changes', function () {
+    $service = app(PurchaseBillService::class);
+    $bill = $service->create([
+        'vendor_id' => $this->vendor->id,
+        'branch_id' => $this->branch->id,
+        'payable_account_id' => $this->payable->id,
+        'bill_number' => 'PB-EDIT-002',
+        'invoice_date' => '2026-01-15',
+        'lines' => [['account_id' => $this->expense->id, 'description' => 'Draft line', 'quantity' => '1.0000', 'unit_amount' => '100.0000']],
+    ], $this->maker);
+    $data = [
+        'vendor_id' => $this->vendor->id,
+        'branch_id' => $this->branch->id,
+        'payable_account_id' => $this->payable->id,
+        'bill_number' => $bill->bill_number,
+        'invoice_date' => '2026-01-15',
+        'expected_updated_at' => '2000-01-01 00:00:00.000000',
+        'lines' => [['account_id' => $this->expense->id, 'description' => 'Draft line', 'quantity' => '1.0000', 'unit_amount' => '100.0000']],
+    ];
+
+    $this->put(route('purchase-bills.update', $bill), $data)->assertSessionHasErrors('status');
+    $bill->update(['status' => PurchaseBillStatus::Submitted]);
+    $data['expected_updated_at'] = $bill->fresh()->updated_at->format('Y-m-d H:i:s.u');
+    $this->put(route('purchase-bills.update', $bill), $data)->assertSessionHasErrors('status');
+
+    $otherBranch = Branch::factory()->create(['status' => 'publish']);
+    $outsider = poUser(SystemRole::Accountant, $otherBranch);
+    $this->actingAs($outsider)->get(route('purchase-bills.edit', $bill))->assertForbidden();
 });

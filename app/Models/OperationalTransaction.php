@@ -9,8 +9,9 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
-#[Fillable(['type', 'status', 'branch_id', 'transaction_date', 'party_name', 'amount', 'financial_account_id', 'contra_account_id', 'payable_account_id', 'vendor_id', 'service_id', 'fund_id', 'donation_category_id', 'purchase_bill_id', 'reference_number', 'narration', 'settlement_type', 'approval_tier', 'attachment_path', 'source_system', 'source_reference', 'source_key', 'journal_entry_id', 'created_by', 'submitted_by', 'approved_by', 'disbursed_by', 'submitted_at', 'approved_at', 'disbursed_at', 'posted_at', 'rejection_reason'])]
+#[Fillable(['type', 'status', 'branch_id', 'transaction_date', 'party_name', 'amount', 'financial_account_id', 'contra_account_id', 'payable_account_id', 'vendor_id', 'service_id', 'fund_id', 'donation_category_id', 'purchase_bill_id', 'payable_obligation_id', 'reference_number', 'narration', 'settlement_type', 'approval_tier', 'attachment_path', 'source_system', 'source_reference', 'source_key', 'journal_entry_id', 'created_by', 'submitted_by', 'approved_by', 'disbursed_by', 'submitted_at', 'approved_at', 'disbursed_at', 'posted_at', 'rejection_reason'])]
 class OperationalTransaction extends Model
 {
     /** @use HasFactory<OperationalTransactionFactory> */
@@ -64,6 +65,16 @@ class OperationalTransaction extends Model
     public function purchaseBill(): BelongsTo
     {
         return $this->belongsTo(PurchaseBill::class);
+    }
+
+    public function payableObligation(): BelongsTo
+    {
+        return $this->belongsTo(PayableObligation::class);
+    }
+
+    public function accruedPayableObligation(): HasOne
+    {
+        return $this->hasOne(PayableObligation::class, 'source_expense_transaction_id');
     }
 
     public function journalEntry(): BelongsTo

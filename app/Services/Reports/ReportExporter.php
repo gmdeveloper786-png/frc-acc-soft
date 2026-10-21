@@ -130,22 +130,29 @@ class ReportExporter
     {
         $pdf = new SimplePdfDocument;
         $widths = $this->columnWidths($table, $pdf->usableWidth());
-        $header = function () use ($pdf, $table, $widths): void {
+        $wrapRows = (bool) ($table->pdfOptions['wrap_rows'] ?? false);
+        $lineHeight = (float) ($table->pdfOptions['line_height'] ?? 10);
+        $cellPadding = (float) ($table->pdfOptions['cell_padding'] ?? 4);
+        $header = function () use ($pdf, $table, $widths, $wrapRows, $lineHeight, $cellPadding): void {
             foreach ($this->headerLines($table) as $index => $line) {
                 $pdf->text($pdf->fit($line, $pdf->usableWidth(), $index < 2 ? 11 : 8, $index < 2), 0, $index < 2 ? 11 : 8, $index < 2);
                 $pdf->moveDown($index < 2 ? 15 : 11);
             }
             $pdf->moveDown(4);
-            $this->pdfRow($pdf, $table, $widths, array_column($table->columns, 'label', 'key'), true, true);
-            $pdf->rule();
+            $this->pdfRow($pdf, $table, $widths, array_column($table->columns, 'label', 'key'), true, true, $wrapRows, $lineHeight, $cellPadding);
+            $pdf->rule($wrapRows ? $cellPadding + 5 : 3);
         };
         $header();
         foreach ($table->rows as $row) {
-            if ($pdf->needsBreak(12)) {
+            $rowHeight = $this->pdfRowHeight($pdf, $table, $widths, $row, isset($row['_style']), $wrapRows, $lineHeight, $cellPadding);
+            if ($pdf->needsBreak($rowHeight)) {
                 $pdf->addPage();
                 $header();
             }
-            $this->pdfRow($pdf, $table, $widths, $row, isset($row['_style']), false);
+            $this->pdfRow($pdf, $table, $widths, $row, isset($row['_style']), false, $wrapRows, $lineHeight, $cellPadding);
+            if ($wrapRows) {
+                $pdf->rule($cellPadding + 5);
+            }
         }
 
         return $pdf->output();
@@ -155,21 +162,61 @@ class ReportExporter
      * @param  list<float>  $widths
      * @param  array<string, mixed>  $row
      */
-    private function pdfRow(SimplePdfDocument $pdf, ReportTable $table, array $widths, array $row, bool $bold, bool $isHeader): void
+    private function pdfRow(SimplePdfDocument $pdf, ReportTable $table, array $widths, array $row, bool $bold, bool $isHeader, bool $wrapRows, float $lineHeight, float $cellPadding): void
     {
+        $cells = $this->pdfCells($pdf, $table, $widths, $row, $bold, $isHeader, $wrapRows);
+        $height = $this->pdfCellsHeight($cells, $wrapRows, $lineHeight, $cellPadding);
         $x = 0;
         foreach ($table->columns as $index => $column) {
             $numeric = in_array($column['type'] ?? 'text', self::NUMERIC_TYPES, true);
+            $indent = $isHeader ? 0 : $this->indent($column, $table, $row) * 8;
+            foreach ($cells[$index] as $lineIndex => $text) {
+                $numeric
+                    ? $pdf->text($text, 0, 8, $bold, $x + $widths[$index] - $cellPadding)
+                    : $pdf->text($text, $x + $indent, 8, $bold);
+                if ($lineIndex < count($cells[$index]) - 1) {
+                    $pdf->moveDown($lineHeight);
+                }
+            }
+            for ($lineIndex = count($cells[$index]) - 1; $lineIndex > 0; $lineIndex--) {
+                $pdf->moveDown(-$lineHeight);
+            }
+            $x += $widths[$index];
+        }
+        $pdf->moveDown($height);
+    }
+
+    /** @param list<float> $widths @param array<string, mixed> $row */
+    private function pdfRowHeight(SimplePdfDocument $pdf, ReportTable $table, array $widths, array $row, bool $bold, bool $wrapRows, float $lineHeight, float $cellPadding): float
+    {
+        return $this->pdfCellsHeight($this->pdfCells($pdf, $table, $widths, $row, $bold, false, $wrapRows), $wrapRows, $lineHeight, $cellPadding);
+    }
+
+    /** @param list<float> $widths @param array<string, mixed> $row @return list<list<string>> */
+    private function pdfCells(SimplePdfDocument $pdf, ReportTable $table, array $widths, array $row, bool $bold, bool $isHeader, bool $wrapRows): array
+    {
+        return array_map(function (array $column, int $index) use ($pdf, $table, $widths, $row, $bold, $isHeader, $wrapRows): array {
             $value = $row[$column['key']] ?? '';
             if (! $isHeader && $this->isNumeric($column, $row)) {
                 $value = $this->display($column['type'], (string) $value);
             }
             $indent = $isHeader ? 0 : $this->indent($column, $table, $row) * 8;
-            $text = $pdf->fit((string) $value, $widths[$index] - 6 - $indent, 8, $bold);
-            $numeric ? $pdf->text($text, 0, 8, $bold, $x + $widths[$index] - 4) : $pdf->text($text, $x + $indent, 8, $bold);
-            $x += $widths[$index];
+            $width = $widths[$index] - 8 - $indent;
+
+            return $wrapRows && ! in_array($column['type'] ?? 'text', self::NUMERIC_TYPES, true)
+                ? $pdf->wrap((string) $value, $width, 8, $bold)
+                : [$pdf->fit((string) $value, $width, 8, $bold)];
+        }, $table->columns, array_keys($table->columns));
+    }
+
+    /** @param list<list<string>> $cells */
+    private function pdfCellsHeight(array $cells, bool $wrapRows, float $lineHeight, float $cellPadding): float
+    {
+        if (! $wrapRows) {
+            return 12;
         }
-        $pdf->moveDown(12);
+
+        return max(array_map('count', $cells)) * $lineHeight + $cellPadding * 2;
     }
 
     /** @return list<float> */

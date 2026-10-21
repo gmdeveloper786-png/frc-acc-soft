@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Accounting;
 
 use App\Enums\AccountMappingKey;
+use App\Enums\PurchaseBillStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StorePurchaseBillRequest;
+use App\Http\Requests\UpdatePurchaseBillRequest;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\AccountMapping;
@@ -13,6 +15,7 @@ use App\Models\PurchaseBill;
 use App\Models\PurchaseOrder;
 use App\Models\Vendor;
 use App\Services\BranchAccess;
+use App\Services\PurchaseBillDebitAccountEligibility;
 use App\Services\PurchaseBillService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -30,7 +33,7 @@ class PurchaseBillController extends Controller
         return view('accounting.purchase-bills.index', ['bills' => $bills, 'vendors' => Vendor::query()->orderBy('name')->get()]);
     }
 
-    public function create(Request $request, BranchAccess $access): View
+    public function create(Request $request, BranchAccess $access, PurchaseBillDebitAccountEligibility $eligibility): View
     {
         abort_unless($request->user()->can('purchase_bills.create'), 403);
         $order = null;
@@ -45,7 +48,8 @@ class PurchaseBillController extends Controller
             'payableMapped' => AccountMapping::query()->whereIn('mapping_key', [AccountMappingKey::AccountsPayable->value, AccountMappingKey::PurchaseBillControl->value])->exists(),
             'branches' => $access->scope($request->user())->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
             'vendors' => Vendor::query()->where('is_active', true)->orderBy('name')->get(),
-            'ledgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->orderBy('code')->get(),
+            'eligibleDebitLedgers' => $eligibility->query()->orderBy('code')->get(),
+            'payableLedgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->where('account_type', 'liability')->orderBy('code')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
         ]);
     }
@@ -61,13 +65,49 @@ class PurchaseBillController extends Controller
         return redirect()->route('purchase-bills.show', $bill)->with('status', 'Purchase bill draft created.');
     }
 
-    public function show(Request $request, PurchaseBill $purchaseBill, BranchAccess $access): View
+    public function show(Request $request, PurchaseBill $purchaseBill, BranchAccess $access, PurchaseBillService $service): View
     {
         abort_unless($access->canAccess($request->user(), $purchaseBill->branch), 403);
         $purchaseBill->load(['vendor', 'branch', 'payableAccount', 'purchaseOrder', 'lines.account', 'lines.service', 'payments.journalEntry', 'journalEntry', 'creator']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
+        $canApprove = $service->canApprove($purchaseBill, $request->user());
+        $canReturn = $service->canReturn($purchaseBill, $request->user());
+        $isPreparer = in_array((int) $request->user()->id, $service->preparerIds($purchaseBill), true);
 
-        return view('accounting.purchase-bills.show', compact('purchaseBill', 'openPeriods'));
+        return view('accounting.purchase-bills.show', compact('purchaseBill', 'openPeriods', 'canApprove', 'canReturn', 'isPreparer'));
+    }
+
+    public function edit(Request $request, PurchaseBill $purchaseBill, BranchAccess $access, PurchaseBillDebitAccountEligibility $eligibility): View
+    {
+        abort_unless($request->user()->can('purchase_bills.update'), 403);
+        abort_unless($access->canAccess($request->user(), $purchaseBill->branch), 403);
+        abort_unless($purchaseBill->status === PurchaseBillStatus::Draft, 403, 'Only a draft purchase bill can be edited.');
+
+        $order = $purchaseBill->purchase_order_id
+            ? $purchaseBill->load(['purchaseOrder.lines', 'purchaseOrder.vendor', 'purchaseOrder.branch'])->purchaseOrder
+            : null;
+
+        return view('accounting.purchase-bills.create', [
+            'purchaseBill' => $purchaseBill->load('lines'),
+            'order' => $order,
+            'payableMapped' => AccountMapping::query()->whereIn('mapping_key', [AccountMappingKey::AccountsPayable->value, AccountMappingKey::PurchaseBillControl->value])->exists(),
+            'branches' => $access->scope($request->user())->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
+            'vendors' => Vendor::query()->where('is_active', true)->orderBy('name')->get(),
+            'eligibleDebitLedgers' => $eligibility->query()->orderBy('code')->get(),
+            'payableLedgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->where('account_type', 'liability')->orderBy('code')->get(),
+            'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
+        ]);
+    }
+
+    public function update(UpdatePurchaseBillRequest $request, PurchaseBill $purchaseBill, PurchaseBillService $service): RedirectResponse
+    {
+        $data = $request->validated();
+        if ($request->hasFile('attachment')) {
+            $data['attachment_path'] = $request->file('attachment')->store('purchase-bills', 'local');
+        }
+        $service->update($purchaseBill, $data, $request->user());
+
+        return redirect()->route('purchase-bills.show', $purchaseBill)->with('status', 'Purchase bill draft updated.');
     }
 
     public function submit(Request $request, PurchaseBill $purchaseBill, PurchaseBillService $service): RedirectResponse

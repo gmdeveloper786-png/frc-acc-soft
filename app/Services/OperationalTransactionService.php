@@ -16,6 +16,7 @@ use App\Models\FinancialAccount;
 use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
+use App\Models\PayableObligation;
 use App\Models\PayrollRun;
 use App\Models\PayrollRunPayment;
 use App\Models\PurchaseBill;
@@ -40,6 +41,7 @@ class OperationalTransactionService
         private SplitPaymentDetector $splits,
         private ManualJournalGuard $guard,
         private FundRestrictionPolicy $fundRules,
+        private PayableObligationService $payableObligations,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -55,18 +57,24 @@ class OperationalTransactionService
             if (! $amount->isPositive()) {
                 throw ValidationException::withMessages(['amount' => 'Amount must be greater than zero.']);
             }
+            $sourceKey = $this->payableObligations->settlementSourceKey($data);
+            if ($sourceKey && ($existing = $this->payableObligations->existingSettlement($sourceKey, $data))) {
+                return $existing;
+            }
+            $data = $this->payableObligations->prepareSettlement($data, $branch, $amount);
             $data = $this->applyMappingDefaults($type, $data);
             $this->validateMappings($type, $data, $branch);
             $data = $this->applyFund($type, $data, $amount);
             if ($type === OperationalTransactionType::VendorPayment) {
-                $this->guardVendorPayment($data, $amount);
+                $data = $this->guardVendorPayment($data, $amount);
             } else {
                 // Only a vendor payment settles a purchase bill; any other type must not count against one.
                 $data['purchase_bill_id'] = null;
             }
 
             $transaction = OperationalTransaction::query()->create([
-                ...collect($data)->except('attachment')->all(),
+                ...collect($data)->except(['attachment', 'settlement_request_token'])->all(),
+                ...($sourceKey ? ['source_key' => $sourceKey] : []),
                 'amount' => AccountingDecimal::string($amount),
                 'status' => OperationalTransactionStatus::Draft,
                 'created_by' => $actor->id,
@@ -87,12 +95,13 @@ class OperationalTransactionService
         abort_unless($actor->can($prefix.'.submit'), 403);
 
         return DB::transaction(function () use ($transaction, $actor, $prefix): OperationalTransaction {
+            $lockedPayableObligation = $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
             $transaction = OperationalTransaction::query()->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             if (! $transaction->type->requiresApproval() || ! in_array($transaction->status, [OperationalTransactionStatus::Draft, OperationalTransactionStatus::Rejected], true)) {
                 throw ValidationException::withMessages(['status' => 'This transaction is not eligible for submission.']);
             }
-            $this->guardObligation($transaction);
+            $this->guardObligation($transaction, $lockedPayableObligation);
             $transaction->update(['status' => OperationalTransactionStatus::Submitted, 'submitted_by' => $actor->id, 'submitted_at' => now(), 'rejection_reason' => null]);
             $this->audit->log($prefix.'.submitted', $transaction);
 
@@ -109,6 +118,7 @@ class OperationalTransactionService
         }
 
         return DB::transaction(function () use ($transaction, $actor, $prefix): OperationalTransaction {
+            $lockedPayableObligation = $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
             $transaction = OperationalTransaction::query()->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             $basis = $this->approvalBasis($transaction, $actor);
@@ -116,7 +126,7 @@ class OperationalTransactionService
             if ($transaction->status !== OperationalTransactionStatus::Submitted || in_array($actor->id, [$transaction->created_by, $transaction->submitted_by], true)) {
                 throw ValidationException::withMessages(['approval' => 'A submitted transaction requires approval by a different authorized user.']);
             }
-            $this->guardObligation($transaction);
+            $this->guardObligation($transaction, $lockedPayableObligation);
             $transaction->update(['status' => OperationalTransactionStatus::Approved, 'approval_tier' => $this->currentTier($transaction), 'approved_by' => $actor->id, 'approved_at' => now()]);
             $this->audit->log($prefix.'.approved', $transaction, ['approval_tier' => $transaction->approval_tier, 'authority_basis' => $basis, 'split_warning' => $this->splits->analyze($transaction)]);
 
@@ -170,6 +180,11 @@ class OperationalTransactionService
             && $this->approvalBasis($transaction, $actor) !== null;
     }
 
+    public function hasActivePayableSettlementsForSource(OperationalTransaction $transaction): bool
+    {
+        return $this->payableObligations->hasActiveSettlementsForSource($transaction);
+    }
+
     /** Approval level for the amount under the threshold configured right now. */
     private function currentTier(OperationalTransaction $transaction): ?string
     {
@@ -182,6 +197,7 @@ class OperationalTransactionService
         abort_unless($actor->is_active && ($actor->can($prefix.'.approve') || $actor->can($this->highValuePermission($transaction->type))), 403);
 
         return DB::transaction(function () use ($transaction, $reason, $actor, $prefix): OperationalTransaction {
+            $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
             $transaction = OperationalTransaction::query()->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             if ($transaction->status !== OperationalTransactionStatus::Submitted || in_array($actor->id, [$transaction->created_by, $transaction->submitted_by], true)) {
@@ -200,17 +216,39 @@ class OperationalTransactionService
         abort_unless($actor->can($prefix.'.disburse'), 403);
 
         return DB::transaction(function () use ($transaction, $actor, $prefix): OperationalTransaction {
+            $lockedPayableObligation = $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
             $transaction = OperationalTransaction::query()->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             if (! $this->needsDisbursement($transaction) || $transaction->status !== OperationalTransactionStatus::Approved) {
                 throw ValidationException::withMessages(['status' => 'Only an approved payment awaiting actual disbursement can be confirmed.']);
             }
-            $this->guardObligation($transaction);
+            $this->guardObligation($transaction, $lockedPayableObligation);
             $transaction->update(['status' => OperationalTransactionStatus::Disbursed, 'disbursed_by' => $actor->id, 'disbursed_at' => now()]);
             $this->audit->log($prefix.'.disbursed', $transaction);
 
             return $transaction;
         }, 3);
+    }
+
+    /**
+     * The only status from which a transaction may be posted: disbursed when money
+     * leaves cash or bank, approved when only approval is required, otherwise draft.
+     * post() and canPost() both use it, so the screen never offers a step the server refuses.
+     */
+    public function postableStatus(OperationalTransaction $transaction): OperationalTransactionStatus
+    {
+        return $this->needsDisbursement($transaction)
+            ? OperationalTransactionStatus::Disbursed
+            : ($transaction->type->requiresApproval() ? OperationalTransactionStatus::Approved : OperationalTransactionStatus::Draft);
+    }
+
+    /** Whether the user may post this transaction now, for the screen. post() checks everything again inside its lock. */
+    public function canPost(OperationalTransaction $transaction, User $actor): bool
+    {
+        return $actor->can($transaction->type->permissionPrefix().'.post')
+            && $this->branchAccess->canAccess($actor, $transaction->branch)
+            && $transaction->journal_entry_id === null
+            && $transaction->status === $this->postableStatus($transaction);
     }
 
     public function post(OperationalTransaction $transaction, User $actor): OperationalTransaction
@@ -219,19 +257,31 @@ class OperationalTransactionService
         abort_unless($actor->can($prefix.'.post'), 403);
 
         return DB::transaction(function () use ($transaction, $actor, $prefix): OperationalTransaction {
+            $lockedPayableObligation = $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
             $transaction = OperationalTransaction::query()->with(['financialAccount.account', 'donationCategory', 'purchaseBill'])->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             if ($transaction->journal_entry_id !== null || $transaction->status === OperationalTransactionStatus::Posted) {
                 throw ValidationException::withMessages(['status' => 'This transaction has already been posted.']);
             }
-            $expected = $this->needsDisbursement($transaction) ? OperationalTransactionStatus::Disbursed : ($transaction->type->requiresApproval() ? OperationalTransactionStatus::Approved : OperationalTransactionStatus::Draft);
-            if ($transaction->status !== $expected) {
+            if ($transaction->status !== $this->postableStatus($transaction)) {
                 throw ValidationException::withMessages(['status' => 'The required workflow steps are incomplete.']);
             }
-            $this->guardObligation($transaction);
+            $this->validateMappings($transaction->type, [
+                'financial_account_id' => $transaction->financial_account_id,
+                'contra_account_id' => $transaction->contra_account_id,
+                'payable_account_id' => $transaction->payable_account_id,
+                'settlement_type' => $transaction->settlement_type,
+            ], $transaction->branch);
+            $this->guardObligation($transaction, $lockedPayableObligation);
             $journal = $this->buildJournal($transaction, $actor);
             $journal = $this->posting->postSystem($journal, $actor);
             $transaction->update(['status' => OperationalTransactionStatus::Posted, 'journal_entry_id' => $journal->id, 'posted_at' => now()]);
+            if ($transaction->type === OperationalTransactionType::Expense && $transaction->settlement_type === 'accrued') {
+                $this->payableObligations->createForPostedExpense($transaction->fresh(), $journal);
+            }
+            if ($transaction->payable_obligation_id) {
+                $this->audit->log('payable_obligations.settled', $transaction, ['payable_obligation_id' => $transaction->payable_obligation_id, 'amount' => $transaction->amount]);
+            }
             $this->audit->log($prefix.'.posted', $transaction, ['journal_entry_id' => $journal->id, 'voucher_number' => $journal->voucher_number]);
 
             return $transaction->refresh()->load('journalEntry');
@@ -244,13 +294,21 @@ class OperationalTransactionService
         abort_unless($actor->can($prefix.'.reverse'), 403);
 
         return DB::transaction(function () use ($transaction, $period, $date, $reason, $actor, $prefix): OperationalTransaction {
+            $lockedSourceObligation = $this->payableObligations->lockSourceExpense($transaction->id);
+            $lockedPayableObligation = $lockedSourceObligation ?? $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
             $transaction = OperationalTransaction::query()->with(['branch', 'journalEntry'])->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             if ($transaction->status !== OperationalTransactionStatus::Posted || ! $transaction->journalEntry) {
                 throw ValidationException::withMessages(['status' => 'Only a posted transaction can be reversed.']);
             }
+            if ($transaction->type === OperationalTransactionType::Expense && $transaction->settlement_type === 'accrued') {
+                $this->payableObligations->assertSourceCanReverse($transaction, $lockedSourceObligation);
+            }
             $this->reversal->reverse($transaction->journalEntry, $period, $date, $reason, $actor);
             $transaction->update(['status' => OperationalTransactionStatus::Reversed]);
+            if ($transaction->payable_obligation_id) {
+                $this->audit->log('payable_obligations.settlement_reversed', $transaction, ['payable_obligation_id' => $transaction->payable_obligation_id]);
+            }
             $this->audit->log($prefix.'.reversed', $transaction, ['reason' => $reason]);
 
             return $transaction->refresh();
@@ -368,6 +426,12 @@ class OperationalTransactionService
     /** @param array<string, mixed> $data */
     private function validateMappings(OperationalTransactionType $type, array $data, Branch $branch): void
     {
+        if ($type === OperationalTransactionType::Expense && ($data['settlement_type'] ?? null) === 'accrued' && filled($data['financial_account_id'] ?? null)) {
+            throw ValidationException::withMessages(['financial_account_id' => 'An accrued expense cannot use a cash or bank account.']);
+        }
+        if ($type === OperationalTransactionType::Expense && ($data['settlement_type'] ?? null) === 'paid' && blank($data['financial_account_id'] ?? null)) {
+            throw ValidationException::withMessages(['financial_account_id' => 'A cash or bank account is required when an expense is paid now.']);
+        }
         $financial = filled($data['financial_account_id'] ?? null) ? FinancialAccount::query()->with('account')->findOrFail($data['financial_account_id']) : null;
         if ($financial && ($financial->branch_id !== $branch->id || ! $financial->is_active)) {
             throw ValidationException::withMessages(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
@@ -396,18 +460,31 @@ class OperationalTransactionService
     }
 
     /** @param array<string, mixed> $data */
-    private function guardVendorPayment(array $data, BigDecimal $amount): void
+    /**
+     * The bill decides the branch and vendor of its payment: a different
+     * submitted branch or vendor is refused, and the vendor is taken from the bill.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function guardVendorPayment(array $data, BigDecimal $amount): array
     {
         $bill = PurchaseBill::query()->lockForUpdate()->findOrFail($data['purchase_bill_id']);
-        if ($bill->status->value !== 'posted' || $bill->branch_id !== (int) $data['branch_id']) {
+        if ($bill->status->value !== 'posted' || (int) $bill->branch_id !== (int) $data['branch_id']) {
             throw ValidationException::withMessages(['purchase_bill_id' => 'Only a posted bill from the selected branch can be paid.']);
         }
+        if (filled($data['vendor_id'] ?? null) && (int) $data['vendor_id'] !== (int) $bill->vendor_id) {
+            throw ValidationException::withMessages(['vendor_id' => 'The vendor must be the vendor of the selected purchase bill.']);
+        }
+        $data['vendor_id'] = $bill->vendor_id;
         // A locking read: a plain read could miss payments committed while this transaction waited for the bill.
         $reserved = $bill->payments()->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value])->lockForUpdate()->get(['id', 'amount'])
             ->reduce(fn (BigDecimal $sum, OperationalTransaction $payment): BigDecimal => $sum->plus(AccountingDecimal::of($payment->amount)), BigDecimal::zero()->toScale(4));
         if ($reserved->plus($amount)->isGreaterThan(AccountingDecimal::of($bill->total_amount))) {
             throw ValidationException::withMessages(['amount' => 'Payment exceeds the bill outstanding amount.']);
         }
+
+        return $data;
     }
 
     /**
@@ -415,7 +492,7 @@ class OperationalTransactionService
      * rejected payment stops reserving its purchase bill or payroll run, so a
      * resubmitted one must still fit, and the obligation must still be posted.
      */
-    private function guardObligation(OperationalTransaction $transaction): void
+    private function guardObligation(OperationalTransaction $transaction, ?PayableObligation $lockedPayableObligation = null): void
     {
         $live = fn ($query) => $query->whereKeyNot($transaction->id)->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value]);
         $sum = fn ($payments): BigDecimal => $payments->reduce(fn (BigDecimal $carry, OperationalTransaction $payment): BigDecimal => $carry->plus(AccountingDecimal::of($payment->amount)), AccountingDecimal::of($transaction->amount));
@@ -429,6 +506,7 @@ class OperationalTransactionService
                 throw ValidationException::withMessages(['amount' => 'Payment exceeds the bill outstanding amount.']);
             }
         }
+        $this->payableObligations->guardSettlement($transaction, $lockedPayableObligation);
 
         $link = PayrollRunPayment::query()->where('operational_transaction_id', $transaction->id)->first();
         if ($link) {

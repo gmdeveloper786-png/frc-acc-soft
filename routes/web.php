@@ -6,6 +6,7 @@ use App\Http\Controllers\Accounting\GeneralLedgerController;
 use App\Http\Controllers\Accounting\JournalController;
 use App\Http\Controllers\Accounting\OperationalReportController;
 use App\Http\Controllers\Accounting\OperationalTransactionController;
+use App\Http\Controllers\Accounting\PayableObligationController;
 use App\Http\Controllers\Accounting\PurchaseBillController;
 use App\Http\Controllers\Accounting\PurchaseOrderController;
 use App\Http\Controllers\Accounting\TrialBalanceController;
@@ -165,6 +166,7 @@ Route::middleware(['auth', 'active'])->group(function (): void {
 
     Route::get('/finance/{type}', [OperationalTransactionController::class, 'index'])->whereIn('type', ['cash_receipt', 'bank_receipt', 'cash_payment', 'bank_payment', 'expense', 'petty_cash', 'donation', 'vendor_payment'])->name('transactions.index');
     Route::get('/finance/{type}/create', [OperationalTransactionController::class, 'create'])->whereIn('type', ['cash_receipt', 'bank_receipt', 'cash_payment', 'bank_payment', 'expense', 'petty_cash', 'donation', 'vendor_payment'])->name('transactions.create');
+    Route::get('/payable-obligations/{payableObligation}/settle', [PayableObligationController::class, 'createSettlement'])->middleware('permission:payments.create')->name('payable-obligations.settle.create');
     Route::post('/finance', [OperationalTransactionController::class, 'store'])->name('transactions.store');
     Route::get('/finance/transaction/{transaction}', [OperationalTransactionController::class, 'show'])->name('transactions.show');
     Route::post('/finance/transaction/{transaction}/submit', [OperationalTransactionController::class, 'submit'])->name('transactions.submit');
@@ -175,7 +177,7 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/finance/transaction/{transaction}/reverse', [OperationalTransactionController::class, 'reverse'])->name('transactions.reverse');
     Route::get('/finance/transaction/{transaction}/acknowledgment', [OperationalTransactionController::class, 'acknowledgment'])->name('transactions.acknowledgment');
 
-    Route::resource('purchase-bills', PurchaseBillController::class)->only(['index', 'create', 'store', 'show'])->middleware('permission:purchase_bills.view');
+    Route::resource('purchase-bills', PurchaseBillController::class)->only(['index', 'create', 'store', 'show', 'edit', 'update'])->middleware('permission:purchase_bills.view');
     Route::post('/purchase-bills/{purchaseBill}/submit', [PurchaseBillController::class, 'submit'])->name('purchase-bills.submit');
     Route::post('/purchase-bills/{purchaseBill}/approve', [PurchaseBillController::class, 'approve'])->name('purchase-bills.approve');
     Route::post('/purchase-bills/{purchaseBill}/reject', [PurchaseBillController::class, 'reject'])->name('purchase-bills.reject');

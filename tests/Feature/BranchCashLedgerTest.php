@@ -3,6 +3,7 @@
 use App\Enums\AccountingPeriodStatus;
 use App\Enums\FiscalYearStatus;
 use App\Enums\JournalStatus;
+use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
 use App\Enums\SystemRole;
 use App\Models\Account;
@@ -40,10 +41,13 @@ beforeEach(function () {
     $this->year = FiscalYear::factory()->create(['start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     AccountingPeriod::factory()->create(['fiscal_year_id' => $this->year, 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
     $this->cashLedger = Account::factory()->create(['code' => '11102', 'name' => 'Cash in Hand - Rehab Centre', 'financial_account_type' => 'cash']);
+    $this->bankLedger = Account::factory()->create(['code' => '11201', 'name' => 'Bank - Main Operating Account', 'financial_account_type' => 'bank']);
     $this->income = Account::factory()->create(['code' => '42102', 'name' => 'Therapy Session Fees', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
     $this->expense = Account::factory()->create(['code' => '53101', 'name' => 'Rent', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
     $this->cashA = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Cash - Shahrah-e-Faisal', 'branch_id' => $this->branchA, 'account_id' => $this->cashLedger]);
     $this->cashB = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Cash - Malir Town', 'branch_id' => $this->branchB, 'account_id' => $this->cashLedger]);
+    $this->bankA = FinancialAccount::factory()->create(['type' => 'bank', 'name' => 'Bank - Shahrah-e-Faisal', 'branch_id' => $this->branchA, 'account_id' => $this->bankLedger]);
+    $this->bankB = FinancialAccount::factory()->create(['type' => 'bank', 'name' => 'Bank - Malir Town', 'branch_id' => $this->branchB, 'account_id' => $this->bankLedger]);
 });
 
 function branchCashUser(SystemRole $role, Branch $branch): User
@@ -108,6 +112,172 @@ test('cash and bank accounts cannot share a ledger', function () {
 
     $this->actingAs($this->admin)->post(route('financial-accounts.store'), branchCashForm($this, ['type' => 'bank', 'bank_name' => 'Synthetic Bank', 'branch_id' => $branchC->id]))
         ->assertSessionHasErrors(['account_id' => 'This ledger is already used by cash accounts. Cash and bank accounts cannot share a ledger.']);
+});
+
+test('cash receipt form marks active accounts with their branch and only submits a matching account', function () {
+    $this->actingAs($this->admin)->get(route('transactions.create', 'cash_receipt'))
+        ->assertOk()
+        ->assertSee('id="transaction-branch"', false)
+        ->assertSee('id="transaction-financial-account"', false)
+        ->assertSee('data-branch-id="'.$this->branchA->id.'"', false)
+        ->assertSee('data-branch-id="'.$this->branchB->id.'"', false)
+        ->assertSee('data-account-type="cash"', false)
+        ->assertSee('data-account-type="bank"', false)
+        ->assertSee('const requiredAccountType = "cash"', false)
+        ->assertSee('refreshFinancialAccounts', false);
+
+    $payload = [
+        'type' => OperationalTransactionType::CashReceipt->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->cashA->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Branch-matched cash receipt',
+    ];
+
+    $this->actingAs($this->admin)->post(route('transactions.store'), $payload)
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->assertDatabaseHas('operational_transactions', [
+        'branch_id' => $this->branchA->id,
+        'financial_account_id' => $this->cashA->id,
+        'narration' => 'Branch-matched cash receipt',
+    ]);
+});
+
+test('bank receipt form filters accounts by branch and bank type', function () {
+    $this->actingAs($this->admin)->get(route('transactions.create', 'bank_receipt'))
+        ->assertOk()
+        ->assertSee('const requiredAccountType = "bank"', false)
+        ->assertSee('option.dataset.accountType === requiredAccountType', false);
+
+    $payload = [
+        'type' => OperationalTransactionType::BankReceipt->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->bankA->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Branch-matched bank receipt',
+    ];
+
+    $this->actingAs($this->admin)->post(route('transactions.store'), $payload)
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->assertDatabaseHas('operational_transactions', [
+        'branch_id' => $this->branchA->id,
+        'financial_account_id' => $this->bankA->id,
+        'narration' => 'Branch-matched bank receipt',
+    ]);
+});
+
+test('cash and bank receipts reject forged incompatible account types even for an administrator', function () {
+    $cashWithBank = [
+        'type' => OperationalTransactionType::CashReceipt->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->bankA->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Forged bank for cash receipt',
+    ];
+    $bankWithCash = [...$cashWithBank,
+        'type' => OperationalTransactionType::BankReceipt->value,
+        'financial_account_id' => $this->cashA->id,
+        'narration' => 'Forged cash for bank receipt',
+    ];
+
+    $this->actingAs($this->admin)->post(route('transactions.store'), $cashWithBank)
+        ->assertSessionHasErrors(['financial_account_id' => 'A cash account is required.']);
+    $this->actingAs($this->admin)->post(route('transactions.store'), $bankWithCash)
+        ->assertSessionHasErrors(['financial_account_id' => 'A bank account is required.']);
+
+    $this->assertDatabaseMissing('operational_transactions', ['narration' => 'Forged bank for cash receipt']);
+    $this->assertDatabaseMissing('operational_transactions', ['narration' => 'Forged cash for bank receipt']);
+});
+
+test('bank receipt posting refuses an existing cash account association', function () {
+    $transaction = OperationalTransaction::query()->create([
+        'type' => OperationalTransactionType::BankReceipt,
+        'status' => OperationalTransactionStatus::Draft,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->cashA->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Invalid bank receipt fixture',
+        'created_by' => $this->admin->id,
+    ]);
+
+    expect(fn () => app(OperationalTransactionService::class)->post($transaction, $this->admin))
+        ->toThrow(ValidationException::class);
+
+    $this->assertDatabaseMissing('journal_entries', ['source_id' => (string) $transaction->id]);
+});
+
+test('cash receipt rejects a forged cross-branch account selection even for an administrator', function () {
+    $payload = [
+        'type' => OperationalTransactionType::CashReceipt->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->cashB->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Forged cross-branch cash receipt',
+    ];
+
+    $this->actingAs($this->admin)->from(route('transactions.create', 'cash_receipt'))
+        ->post(route('transactions.store'), $payload)
+        ->assertRedirect(route('transactions.create', 'cash_receipt'))
+        ->assertSessionHasErrors(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
+
+    $this->assertDatabaseMissing('operational_transactions', ['narration' => 'Forged cross-branch cash receipt']);
+});
+
+test('cash receipt posting refuses an existing cross-branch account association', function () {
+    $transaction = OperationalTransaction::query()->create([
+        'type' => OperationalTransactionType::CashReceipt,
+        'status' => OperationalTransactionStatus::Draft,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->cashB->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Invalid persisted fixture',
+        'created_by' => $this->admin->id,
+    ]);
+
+    expect(fn () => app(OperationalTransactionService::class)->post($transaction, $this->admin))
+        ->toThrow(ValidationException::class);
+
+    $this->assertDatabaseMissing('journal_entries', ['source_id' => (string) $transaction->id]);
+});
+
+test('operational reversal defaults to the open period containing its reversal date', function () {
+    $receipt = branchCashReceipt($this, $this->cashA, '1000.0000');
+    $january = AccountingPeriod::query()->firstOrFail();
+    $january->update(['status' => AccountingPeriodStatus::Closed]);
+    $october = AccountingPeriod::factory()->create([
+        'fiscal_year_id' => $this->year,
+        'name' => 'October 2026',
+        'period_number' => 10,
+        'start_date' => '2026-10-01',
+        'end_date' => '2026-10-31',
+        'status' => AccountingPeriodStatus::Open,
+    ]);
+
+    $this->travelTo('2026-10-20');
+
+    $this->actingAs($this->admin)->get(route('transactions.show', OperationalTransaction::query()->where('journal_entry_id', $receipt->id)->firstOrFail()))
+        ->assertOk()
+        ->assertSee('value="'.$october->id.'" data-start-date="2026-10-01" data-end-date="2026-10-31" selected', false)
+        ->assertSee('id="reversal-date" type="date" name="transaction_date" value="2026-10-20"', false)
+        ->assertDontSee('<option value="'.$january->id.'" data-start-date="2026-01-01" data-end-date="2026-01-31" selected', false);
+
+    $this->travelBack();
 });
 
 test('receipts on a shared ledger keep exact balances per branch and per cash account', function () {
@@ -243,4 +413,70 @@ test('a reversed receipt nets to zero in the cash book and the account balance',
 
     $this->actingAs($this->admin)->get(route('financial-accounts.index'))->assertOk()->assertSeeInOrder(['Cash - Shahrah-e-Faisal', '0.00']);
     expect(branchCashTrialBalance($this, [$this->branchA->id])[0])->toBe('0.0000');
+});
+
+test('cash payment actions follow the operational status workflow', function () {
+    $service = app(OperationalTransactionService::class);
+    $payment = $service->create([
+        'type' => OperationalTransactionType::CashPayment->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'party_name' => 'Supplier',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->cashA->id,
+        'contra_account_id' => $this->expense->id,
+        'narration' => 'Payment workflow visibility fixture',
+    ], $this->admin);
+
+    $this->actingAs($this->admin)->get(route('transactions.show', $payment))->assertOk()
+        ->assertSee('Submit for approval')->assertDontSee('Post to Journal Engine');
+
+    $service->submit($payment, $this->admin);
+    $approver = branchCashUser(SystemRole::Administrator, $this->branchA);
+    $this->actingAs($approver)->get(route('transactions.show', $payment->fresh()))->assertOk()
+        ->assertSee('Approve')->assertSee('Return for correction')->assertDontSee('Post to Journal Engine');
+
+    $service->approve($payment->fresh(), $approver);
+    $this->actingAs($approver)->get(route('transactions.show', $payment->fresh()))->assertOk()
+        ->assertSee('Confirm disbursement')->assertDontSee('Post to Journal Engine');
+
+    $service->disburse($payment->fresh(), $approver);
+    $this->actingAs($approver)->get(route('transactions.show', $payment->fresh()))->assertOk()
+        ->assertSee('Post to Journal Engine')->assertDontSee('Confirm disbursement');
+
+    $service->post($payment->fresh(), $approver);
+    $this->actingAs($approver)->get(route('transactions.show', $payment->fresh()))->assertOk()
+        ->assertSee('Reverse')->assertDontSee('Submit for approval')->assertDontSee('Confirm disbursement')->assertDontSee('Post to Journal Engine');
+});
+
+test('cash receipt retains authorized direct posting while draft', function () {
+    $receipt = app(OperationalTransactionService::class)->create([
+        'type' => OperationalTransactionType::CashReceipt->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'party_name' => 'Client',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->cashA->id,
+        'contra_account_id' => $this->income->id,
+        'narration' => 'Receipt workflow visibility fixture',
+    ], $this->admin);
+
+    $this->actingAs($this->admin)->get(route('transactions.show', $receipt))->assertOk()
+        ->assertSee('Post to Journal Engine')->assertDontSee('Submit for approval');
+});
+
+test('bank payment draft does not expose direct journal posting', function () {
+    $payment = app(OperationalTransactionService::class)->create([
+        'type' => OperationalTransactionType::BankPayment->value,
+        'branch_id' => $this->branchA->id,
+        'transaction_date' => '2026-01-15',
+        'party_name' => 'Supplier',
+        'amount' => '100.0000',
+        'financial_account_id' => $this->bankA->id,
+        'contra_account_id' => $this->expense->id,
+        'narration' => 'Bank payment workflow visibility fixture',
+    ], $this->admin);
+
+    $this->actingAs($this->admin)->get(route('transactions.show', $payment))->assertOk()
+        ->assertSee('Submit for approval')->assertDontSee('Post to Journal Engine');
 });
