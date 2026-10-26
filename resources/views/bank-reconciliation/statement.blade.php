@@ -5,7 +5,7 @@
     $bookAmount = fn ($line) => \App\Services\BankReconciliation\Amount::journalLine($line->debit, $line->credit)->abs();
 @endphp
 @section('title','Bank Reconciliation Statement') @section('eyebrow',$appSettings['organization_name']) @section('page-title','Bank Reconciliation Statement')
-@section('page-description',$account->name.' • '.$account->branch->name.' • as at '.$reconciliation->statement_date->format('d M Y').' • '.$reconciliation->statusLabel())
+@section('page-description',$account->name.' • '.($account->isShared() ? 'All Branches — Shared (custodian: '.$account->branch->name.')' : $account->branch->name).' • as at '.$reconciliation->statement_date->format('d M Y').' • '.$reconciliation->statusLabel())
 @section('page-actions')
 <div class="d-flex gap-2">
     <button class="btn btn-outline-primary" type="button" onclick="window.print()">Print</button>
@@ -17,7 +17,11 @@
 <section class="surface-card">
     <div class="row g-3 mb-3">
         <div class="col-md-3"><small>Bank account</small><strong class="d-block">{{ $account->name }}</strong><span class="table-subtext">{{ $account->bank_name }} {{ $account->maskedNumber() }}</span></div>
-        <div class="col-md-3"><small>Branch</small><strong class="d-block">{{ $account->branch->name }}</strong></div>
+        @if($account->isShared())
+            <div class="col-md-3"><small>Account scope</small><strong class="d-block">All Branches — Shared</strong><span class="table-subtext">Custodian branch: {{ $account->branch->name }}</span></div>
+        @else
+            <div class="col-md-3"><small>Branch</small><strong class="d-block">{{ $account->branch->name }}</strong></div>
+        @endif
         <div class="col-md-3"><small>Statement date</small><strong class="d-block">{{ $reconciliation->statement_date->format('d M Y') }}</strong></div>
         <div class="col-md-3"><small>Currency</small><strong class="d-block">{{ $appSettings['currency_code'] }}</strong></div>
     </div>

@@ -10,6 +10,7 @@ use App\Http\Controllers\Accounting\PayableObligationController;
 use App\Http\Controllers\Accounting\PurchaseBillController;
 use App\Http\Controllers\Accounting\PurchaseOrderController;
 use App\Http\Controllers\Accounting\TrialBalanceController;
+use App\Http\Controllers\Accounting\UnifiedPaymentController;
 use App\Http\Controllers\Accounting\VendorController;
 use App\Http\Controllers\Accounting\VoucherTypeController;
 use App\Http\Controllers\AccountingSetup\AccountController;
@@ -20,6 +21,9 @@ use App\Http\Controllers\AccountingSetup\AccountMappingController;
 use App\Http\Controllers\AccountingSetup\FiscalYearController;
 use App\Http\Controllers\AccountingSetup\OpeningBalanceController;
 use App\Http\Controllers\AccountingSetup\OpeningBalanceImportController;
+use App\Http\Controllers\AccountingSetup\PayeeController;
+use App\Http\Controllers\AccountingSetup\PayeeTypeController;
+use App\Http\Controllers\AccountingSetup\PaymentPurposeController;
 use App\Http\Controllers\AccountingSetup\YearEndClosingController;
 use App\Http\Controllers\Administration\RoleController;
 use App\Http\Controllers\Administration\UserController;
@@ -108,6 +112,13 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/accounts/import/{accountImport}/decide', [AccountImportController::class, 'decide'])->middleware('permission:accounts.import')->name('account-imports.decide');
     Route::get('/accounts/import/{accountImport}/export', [AccountImportController::class, 'export'])->middleware('permission:accounts.import')->name('account-imports.export');
 
+    // Payment configuration: purposes and payee types use the GL Mapping permissions, the Payee Directory the vendor permissions.
+    Route::resource('payment-purposes', PaymentPurposeController::class)->only(['index', 'create', 'store', 'edit', 'update'])->middleware('permission:account_mappings.view');
+    Route::post('/payment-purposes/{paymentPurpose}/toggle', [PaymentPurposeController::class, 'toggle'])->middleware('permission:account_mappings.view')->name('payment-purposes.toggle');
+    Route::resource('payee-types', PayeeTypeController::class)->only(['index', 'create', 'store', 'edit', 'update'])->middleware('permission:account_mappings.view');
+    Route::post('/payee-types/{payeeType}/toggle', [PayeeTypeController::class, 'toggle'])->middleware('permission:account_mappings.view')->name('payee-types.toggle');
+    Route::resource('payees', PayeeController::class)->only(['index', 'create', 'store', 'edit', 'update'])->middleware('permission:vendors.view');
+    Route::post('/payees/{payee}/toggle', [PayeeController::class, 'toggle'])->middleware('permission:vendors.view')->name('payees.toggle');
     Route::get('/account-mappings', [AccountMappingController::class, 'index'])->middleware('permission:account_mappings.view')->name('account-mappings.index');
     Route::put('/account-mappings/services/{service}', [AccountMappingController::class, 'updateService'])->middleware('permission:account_mappings.manage')->name('account-mappings.services.update');
     Route::put('/account-mappings/{mappingKey}', [AccountMappingController::class, 'update'])->middleware('permission:account_mappings.manage')->name('account-mappings.update');
@@ -164,6 +175,10 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::get('/donation-categories', [DonationCategoryController::class, 'index'])->middleware('permission:donations.manage_categories')->name('donation-categories.index');
     Route::put('/donation-categories/{donationCategory}', [DonationCategoryController::class, 'update'])->middleware('permission:donations.manage_categories')->name('donation-categories.update');
 
+    // Unified payment entry (Phase 1: bank payments). Each purpose checks its own permission in UnifiedPaymentService.
+    Route::get('/finance/payments', [UnifiedPaymentController::class, 'index'])->name('payments.index');
+    Route::get('/finance/payments/create', [UnifiedPaymentController::class, 'create'])->name('payments.create');
+    Route::post('/finance/payments', [UnifiedPaymentController::class, 'store'])->name('payments.store');
     Route::get('/finance/{type}', [OperationalTransactionController::class, 'index'])->whereIn('type', ['cash_receipt', 'bank_receipt', 'cash_payment', 'bank_payment', 'expense', 'petty_cash', 'donation', 'vendor_payment'])->name('transactions.index');
     Route::get('/finance/{type}/create', [OperationalTransactionController::class, 'create'])->whereIn('type', ['cash_receipt', 'bank_receipt', 'cash_payment', 'bank_payment', 'expense', 'petty_cash', 'donation', 'vendor_payment'])->name('transactions.create');
     Route::get('/payable-obligations/{payableObligation}/settle', [PayableObligationController::class, 'createSettlement'])->middleware('permission:payments.create')->name('payable-obligations.settle.create');

@@ -37,7 +37,7 @@ beforeEach(function () {
     $this->approver = controlUser(SystemRole::Approver, $this->branch);
     $this->director = controlUser(SystemRole::Director, $this->branch);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => Account::factory()]);
-    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
+    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true, 'direct_payment_eligible' => true]);
     $this->payable = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->actingAs($this->maker);
 });
@@ -60,6 +60,10 @@ function approvalControls(array $overrides = []): array
 function submittedOutflow(object $test, OperationalTransactionType $type, string $amount, array $overrides = []): OperationalTransaction
 {
     $service = app(OperationalTransactionService::class);
+    // A petty cash voucher is paid from the cash account of an active, funded imprest float.
+    if ($type === OperationalTransactionType::PettyCash && ! isset($overrides['financial_account_id'])) {
+        $overrides['financial_account_id'] = fundedPettyCashAccount($test->branch->id)->id;
+    }
     $transaction = $service->create([
         'type' => $type->value, 'branch_id' => $test->branch->id, 'transaction_date' => '2026-01-15', 'amount' => $amount,
         'financial_account_id' => $test->cash->id, 'contra_account_id' => $test->expense->id, 'narration' => 'Isolated outflow fixture', ...$overrides,
@@ -148,7 +152,7 @@ test('every cash outflow above the threshold needs director approval', function 
     $approved = $service->approve($transaction, $this->director);
     expect($approved->status)->toBe(OperationalTransactionStatus::Approved)
         ->and($approved->approved_by)->toBe($this->director->id)
-        ->and(JournalEntry::query()->count())->toBe(0);
+        ->and(JournalEntry::query()->where('source_key', 'operational_transaction:'.$transaction->id)->count())->toBe(0);
 })->with([
     'cash payment' => [OperationalTransactionType::CashPayment, []],
     'paid expense' => [OperationalTransactionType::Expense, ['settlement_type' => 'paid']],

@@ -22,7 +22,7 @@ class FinancialAccountController extends Controller
 {
     public function index(Request $request, BranchAccess $access): View
     {
-        $accounts = FinancialAccount::query()->with(['account', 'branch'])->whereIn('branch_id', $access->scope($request->user())->select('id'))
+        $accounts = FinancialAccount::query()->with(['account', 'branch'])->bookVisibleTo($request->user(), $access->scope($request->user())->select('id'))
             ->when($request->filled('type'), fn ($q) => $q->where('type', $request->string('type')))
             ->when($request->filled('status'), fn ($q) => $q->where('is_active', $request->string('status') === 'active'))
             ->when($request->filled('search'), fn ($q) => $q->where(fn ($q) => $q->where('name', 'like', '%'.$request->string('search').'%')->orWhere('bank_name', 'like', '%'.$request->string('search').'%')))
@@ -43,6 +43,7 @@ class FinancialAccountController extends Controller
     {
         $data = $request->validated();
         $branch = $access->scope($request->user())->findOrFail($data['branch_id']);
+        $this->authorizeScope($request, $data);
         $data['account_last_four'] = filled($data['account_number'] ?? null) ? substr(preg_replace('/[^A-Za-z0-9]/', '', $data['account_number']), -4) : null;
         unset($data['keep_account_number']);
         $data['created_by'] = $request->user()->id;
@@ -54,17 +55,18 @@ class FinancialAccountController extends Controller
 
     public function edit(Request $request, FinancialAccount $financialAccount, BranchAccess $access): View
     {
-        abort_unless($request->user()->can('financial_accounts.manage') && $access->canAccess($request->user(), $financialAccount->branch), 403);
+        abort_unless($request->user()->can('financial_accounts.manage') && $financialAccount->bookVisibleTo($request->user(), $access->canAccess($request->user(), $financialAccount->branch)), 403);
 
         return view('accounting.financial-accounts.form', [...$this->formData($request, $access), 'financialAccount' => $financialAccount]);
     }
 
     public function update(StoreFinancialAccountRequest $request, FinancialAccount $financialAccount, BranchAccess $access, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($access->canAccess($request->user(), $financialAccount->branch), 403);
+        abort_unless($financialAccount->bookVisibleTo($request->user(), $access->canAccess($request->user(), $financialAccount->branch)), 403);
         $data = $request->validated();
         unset($data['keep_account_number']);
         $access->scope($request->user())->findOrFail($data['branch_id']);
+        $this->authorizeScope($request, $data);
         if (blank($data['account_number'] ?? null)) {
             unset($data['account_number']);
         } else {
@@ -77,6 +79,11 @@ class FinancialAccountController extends Controller
         if ($used && ((int) $data['account_id'] !== $financialAccount->account_id || (int) $data['branch_id'] !== $financialAccount->branch_id || $data['type'] !== $financialAccount->type)) {
             throw ValidationException::withMessages(['account_id' => 'The ledger, branch and type of a cash or bank account cannot be changed after transactions exist. Deactivate it and create a new account instead.']);
         }
+        // A used account may become shared (its postings stay where they are), but a shared one may not
+        // become branch-only again: other branches' postings would drop out of its book and reconciliation.
+        if ($used && $financialAccount->isShared() && ($data['scope'] ?? FinancialAccount::SCOPE_BRANCH) !== FinancialAccount::SCOPE_ORGANIZATION) {
+            throw ValidationException::withMessages(['scope' => 'A shared bank account that has transactions cannot be limited to one branch.']);
+        }
         $financialAccount->update($data);
         $audit->log('financial_accounts.updated', $financialAccount, ['branch_id' => $financialAccount->branch_id, 'type' => $financialAccount->type]);
 
@@ -85,7 +92,7 @@ class FinancialAccountController extends Controller
 
     public function toggle(Request $request, FinancialAccount $financialAccount, BranchAccess $access, AuditLogger $audit, FinancialAccountActivationGuard $activationGuard): RedirectResponse
     {
-        abort_unless($request->user()->can('financial_accounts.manage') && $access->canAccess($request->user(), $financialAccount->branch), 403);
+        abort_unless($request->user()->can('financial_accounts.manage') && $financialAccount->bookVisibleTo($request->user(), $access->canAccess($request->user(), $financialAccount->branch)), 403);
         if (! $financialAccount->is_active) {
             $activationGuard->assertCanActivate($financialAccount);
         }
@@ -112,8 +119,14 @@ class FinancialAccountController extends Controller
             ->get()->keyBy(fn ($sum): string => $sum->account_id.':'.$sum->branch_id);
 
         return $accounts->mapWithKeys(function (FinancialAccount $account) use ($sums): array {
-            $sum = $sums->get($account->account_id.':'.$account->branch_id);
-            $balance = AccountingDecimal::of((string) ($sum->debit ?? '0'))->minus(AccountingDecimal::of((string) ($sum->credit ?? '0')));
+            // A shared account's balance is its ledger across every branch.
+            $lines = $account->isShared()
+                ? $sums->filter(fn ($sum): bool => (int) $sum->account_id === $account->account_id)
+                : $sums->only([$account->account_id.':'.$account->branch_id]);
+            $balance = AccountingDecimal::of('0');
+            foreach ($lines as $sum) {
+                $balance = $balance->plus(AccountingDecimal::of((string) $sum->debit))->minus(AccountingDecimal::of((string) $sum->credit));
+            }
 
             return [$account->id => AccountingDecimal::string($balance)];
         })->all();
@@ -129,9 +142,16 @@ class FinancialAccountController extends Controller
         return DB::table('journal_lines')->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
             ->where(function ($query) use ($accounts): void {
                 foreach ($accounts as $account) {
-                    $query->orWhere(fn ($pair) => $pair->where('journal_lines.account_id', $account->account_id)->where('journal_entries.branch_id', $account->branch_id));
+                    $query->orWhere(fn ($pair) => $pair->where('journal_lines.account_id', $account->account_id)
+                        ->when(! $account->isShared(), fn ($own) => $own->where('journal_entries.branch_id', $account->branch_id)));
                 }
             });
+    }
+
+    /** Only a user with access to every branch may create or keep a shared (all branches) account. */
+    private function authorizeScope(Request $request, array $data): void
+    {
+        abort_if(($data['scope'] ?? FinancialAccount::SCOPE_BRANCH) === FinancialAccount::SCOPE_ORGANIZATION && ! $request->user()->can('branches.view_all'), 403);
     }
 
     private function formData(Request $request, BranchAccess $access): array

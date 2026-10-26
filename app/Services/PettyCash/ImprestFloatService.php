@@ -44,7 +44,7 @@ class ImprestFloatService
     /** @return Collection<int, FinancialAccount> Active bank and cash accounts of the branch with a usable ledger. */
     public function candidateSources(int $branchId): Collection
     {
-        return FinancialAccount::query()->with('account')->where('branch_id', $branchId)->whereIn('type', ['bank', 'cash'])->where('is_active', true)->orderBy('type')->orderBy('name')->get()
+        return FinancialAccount::query()->with('account')->usableIn($branchId)->whereIn('type', ['bank', 'cash'])->where('is_active', true)->orderBy('type')->orderBy('name')->get()
             ->filter(fn (FinancialAccount $account): bool => $this->mappings->isUsable($account->account, AccountType::Asset))->values();
     }
 

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\OperationalTransactionStatus;
 use App\Enums\StaffAdvanceStatus;
 use App\Enums\StaffAdvanceType;
 use App\Services\AccountingDecimal;
@@ -35,7 +36,10 @@ class StaffAdvance extends Model
             if (! $original->isEditable() && $advance->isDirty(self::LOCKED_FIELDS)) {
                 throw new LogicException('The terms of a staff advance cannot change after it was submitted.');
             }
-            if ($original->isDisbursed() && $advance->isDirty('disbursement_transaction_id')) {
+            // The only allowed change: clearing a payout whose payment has been reversed, returning the advance to Approved.
+            $reversedPayoutCleared = $advance->disbursement_transaction_id === null && $advance->status === StaffAdvanceStatus::Approved
+                && OperationalTransaction::query()->whereKey($advance->getRawOriginal('disbursement_transaction_id'))->value('status') === OperationalTransactionStatus::Reversed;
+            if ($original->isDisbursed() && $advance->isDirty('disbursement_transaction_id') && ! $reversedPayoutCleared) {
                 throw new LogicException('The disbursement of a staff advance cannot be replaced.');
             }
         });

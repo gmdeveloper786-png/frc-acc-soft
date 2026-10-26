@@ -21,7 +21,8 @@ class BankBook
         return JournalLine::query()->select('journal_lines.*')
             ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
             ->where('journal_lines.account_id', $account->account_id)
-            ->where('journal_entries.branch_id', $account->branch_id)
+            // One shared bank account is one book: its ledger in every branch.
+            ->when(! $account->isShared(), fn (Builder $query) => $query->where('journal_entries.branch_id', $account->branch_id))
             ->whereIn('journal_entries.status', [JournalStatus::Posted->value, JournalStatus::Reversed->value])
             ->when($upTo, fn (Builder $query) => $query->whereDate('journal_entries.transaction_date', '<=', $upTo->toDateString()));
     }

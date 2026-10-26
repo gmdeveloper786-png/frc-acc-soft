@@ -23,6 +23,7 @@ Route::prefix('bank-reconciliation')->group(function (): void {
         Route::get('/', [BankReconciliationController::class, 'show'])->middleware('permission:bank_reconciliation.view')->name('bank-reconciliations.show');
         Route::get('/statement', [BankReconciliationController::class, 'statement'])->middleware('permission:bank_reconciliation.view')->name('bank-reconciliations.statement');
         Route::get('/export/{format}', [BankReconciliationController::class, 'export'])->whereIn('format', ['csv', 'xlsx', 'pdf'])->middleware(['permission:bank_reconciliation.view', 'permission:finance_reports.export'])->name('bank-reconciliations.export');
+        Route::post('/cancel', [BankReconciliationController::class, 'cancel'])->middleware('permission:bank_reconciliation.prepare')->name('bank-reconciliations.cancel');
         Route::post('/submit', [BankReconciliationController::class, 'submit'])->middleware('permission:bank_reconciliation.prepare')->name('bank-reconciliations.submit');
         Route::post('/approve', [BankReconciliationController::class, 'approve'])->middleware('permission:bank_reconciliation.approve')->name('bank-reconciliations.approve');
         Route::post('/reject', [BankReconciliationController::class, 'reject'])->middleware('permission:bank_reconciliation.approve')->name('bank-reconciliations.reject');

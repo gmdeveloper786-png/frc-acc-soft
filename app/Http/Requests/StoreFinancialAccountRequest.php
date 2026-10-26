@@ -41,6 +41,7 @@ class StoreFinancialAccountRequest extends FormRequest
                 // An organisational ledger may back one account per branch; branch balances come from the journal's branch.
                 Rule::unique('financial_accounts')->where(fn ($query) => $query->where('branch_id', $this->integer('branch_id')))->ignore($id),
                 $this->sameTypeOnLedger($id),
+                $this->sharedLedgerExclusive($id),
                 Rule::exists('accounts', 'id')->where(fn ($query) => $query
                     ->where('level', 'ledger')
                     ->where('account_type', 'asset')
@@ -51,6 +52,8 @@ class StoreFinancialAccountRequest extends FormRequest
                     ->where('is_active', true)),
             ],
             'branch_id' => ['required', 'integer', Rule::exists('branches', 'id')->whereIn('status', ['publish', 'active'])],
+            // "organization": one bank account shared by every branch; branch_id is then its custodian branch.
+            'scope' => ['sometimes', Rule::in([FinancialAccount::SCOPE_BRANCH, FinancialAccount::SCOPE_ORGANIZATION]), Rule::prohibitedIf($this->input('type') !== 'bank' && $this->input('scope') === FinancialAccount::SCOPE_ORGANIZATION)],
             'bank_name' => ['nullable', 'required_if:type,bank', 'string', 'max:255'],
             'account_title' => ['nullable', 'required_if:type,bank', 'string', 'max:255'],
             'account_number' => [Rule::requiredIf($this->input('type') === 'bank' && ! $this->canKeepExistingAccountNumber()), 'nullable', 'string', 'max:80', new AccountNumberOrIban],
@@ -64,6 +67,7 @@ class StoreFinancialAccountRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'scope.prohibited' => 'Only a bank account can be shared by all branches. Cash accounts stay branch-specific.',
             'account_id.unique' => 'This branch already has a cash or bank account on this ledger. Each branch can link a ledger once, so its balance stays reconcilable.',
             'account_id.exists' => 'Select an active, posting-enabled Asset ledger classified for the chosen Cash or Bank account type.',
             'name.min' => 'Enter a meaningful bank account name of at least 2 characters.',
@@ -81,6 +85,20 @@ class StoreFinancialAccountRequest extends FormRequest
                 ->where('type', '!=', (string) $this->input('type'))->value('type');
             if ($other !== null) {
                 $fail("This ledger is already used by {$other} accounts. Cash and bank accounts cannot share a ledger.");
+            }
+        };
+    }
+
+    /**
+     * A shared account's ledger belongs to it alone: no branch account may use the
+     * same ledger, or one bank balance would be booked and reconciled twice.
+     */
+    private function sharedLedgerExclusive(?int $id): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail) use ($id): void {
+            $others = FinancialAccount::query()->where('account_id', (int) $value)->when($id, fn ($query) => $query->whereKeyNot($id));
+            if ($this->input('scope') === FinancialAccount::SCOPE_ORGANIZATION ? $others->exists() : $others->where('scope', FinancialAccount::SCOPE_ORGANIZATION)->exists()) {
+                $fail('This ledger is used by a shared bank account, or already by another account. A shared bank account needs a ledger of its own.');
             }
         };
     }

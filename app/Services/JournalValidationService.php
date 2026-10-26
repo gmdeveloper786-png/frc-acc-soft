@@ -46,7 +46,7 @@ class JournalValidationService
             }
 
             $account = $line->account;
-            if (! $account || ! $account->is_active || ! $account->is_postable || $account->level !== AccountLevel::Ledger) {
+            if (! $account || ! $account->is_active || ! $account->is_postable || $account->level !== AccountLevel::Ledger || $account->hasInactiveAncestor()) {
                 $errors["lines.{$index}.account_id"] = 'Only active, postable ledger accounts may receive journal activity.';
             }
             if ($line->service_id && (! $line->service || ! in_array($line->service->status, ['publish', 'active'], true))) {

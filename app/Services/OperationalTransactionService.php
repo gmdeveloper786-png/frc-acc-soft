@@ -6,10 +6,14 @@ use App\Enums\AccountMappingKey;
 use App\Enums\JournalStatus;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
+use App\Enums\PayrollComponentCategory;
+use App\Enums\PayrollComponentType;
 use App\Enums\PayrollRunStatus;
 use App\Enums\PurchaseBillStatus;
+use App\Enums\StaffAdvanceStatus;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
+use App\Models\AccountMapping;
 use App\Models\Branch;
 use App\Models\DonationCategory;
 use App\Models\FinancialAccount;
@@ -17,12 +21,16 @@ use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
 use App\Models\PayableObligation;
+use App\Models\PayrollComponent;
 use App\Models\PayrollRun;
 use App\Models\PayrollRunPayment;
 use App\Models\PurchaseBill;
+use App\Models\StaffAdvance;
 use App\Models\User;
 use App\Models\VoucherType;
 use App\Services\Funds\FundRestrictionPolicy;
+use App\Services\Payroll\StaffAdvanceService;
+use App\Services\PettyCash\ImprestLedgerService;
 use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
@@ -42,6 +50,7 @@ class OperationalTransactionService
         private ManualJournalGuard $guard,
         private FundRestrictionPolicy $fundRules,
         private PayableObligationService $payableObligations,
+        private ImprestLedgerService $imprest,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -64,6 +73,7 @@ class OperationalTransactionService
             $data = $this->payableObligations->prepareSettlement($data, $branch, $amount);
             $data = $this->applyMappingDefaults($type, $data);
             $this->validateMappings($type, $data, $branch);
+            $this->guardFloat($type, isset($data['financial_account_id']) ? (int) $data['financial_account_id'] : null, AccountingDecimal::string($amount));
             $data = $this->applyFund($type, $data, $amount);
             if ($type === OperationalTransactionType::VendorPayment) {
                 $data = $this->guardVendorPayment($data, $amount);
@@ -71,6 +81,7 @@ class OperationalTransactionService
                 // Only a vendor payment settles a purchase bill; any other type must not count against one.
                 $data['purchase_bill_id'] = null;
             }
+            $this->guardPaymentLedger($type, $data);
 
             $transaction = OperationalTransaction::query()->create([
                 ...collect($data)->except(['attachment', 'settlement_request_token'])->all(),
@@ -102,6 +113,7 @@ class OperationalTransactionService
                 throw ValidationException::withMessages(['status' => 'This transaction is not eligible for submission.']);
             }
             $this->guardObligation($transaction, $lockedPayableObligation);
+            $this->guardTransactionFloat($transaction);
             $transaction->update(['status' => OperationalTransactionStatus::Submitted, 'submitted_by' => $actor->id, 'submitted_at' => now(), 'rejection_reason' => null]);
             $this->audit->log($prefix.'.submitted', $transaction);
 
@@ -127,6 +139,7 @@ class OperationalTransactionService
                 throw ValidationException::withMessages(['approval' => 'A submitted transaction requires approval by a different authorized user.']);
             }
             $this->guardObligation($transaction, $lockedPayableObligation);
+            $this->guardTransactionFloat($transaction);
             $transaction->update(['status' => OperationalTransactionStatus::Approved, 'approval_tier' => $this->currentTier($transaction), 'approved_by' => $actor->id, 'approved_at' => now()]);
             $this->audit->log($prefix.'.approved', $transaction, ['approval_tier' => $transaction->approval_tier, 'authority_basis' => $basis, 'split_warning' => $this->splits->analyze($transaction)]);
 
@@ -223,6 +236,7 @@ class OperationalTransactionService
                 throw ValidationException::withMessages(['status' => 'Only an approved payment awaiting actual disbursement can be confirmed.']);
             }
             $this->guardObligation($transaction, $lockedPayableObligation);
+            $this->guardTransactionFloat($transaction);
             $transaction->update(['status' => OperationalTransactionStatus::Disbursed, 'disbursed_by' => $actor->id, 'disbursed_at' => now()]);
             $this->audit->log($prefix.'.disbursed', $transaction);
 
@@ -273,9 +287,15 @@ class OperationalTransactionService
                 'settlement_type' => $transaction->settlement_type,
             ], $transaction->branch);
             $this->guardObligation($transaction, $lockedPayableObligation);
+            $this->guardTransactionFloat($transaction);
             $journal = $this->buildJournal($transaction, $actor);
             $journal = $this->posting->postSystem($journal, $actor);
             $transaction->update(['status' => OperationalTransactionStatus::Posted, 'journal_entry_id' => $journal->id, 'posted_at' => now()]);
+            // A payment raised for a staff advance becomes its payout now, in this same transaction;
+            // resolved lazily because the staff advance service depends on this service through payroll.
+            if (StaffAdvanceService::advanceIdFrom($transaction->source_reference) !== null) {
+                app(StaffAdvanceService::class)->linkPostedPayment($transaction->fresh(), $actor);
+            }
             if ($transaction->type === OperationalTransactionType::Expense && $transaction->settlement_type === 'accrued') {
                 $this->payableObligations->createForPostedExpense($transaction->fresh(), $journal);
             }
@@ -304,8 +324,14 @@ class OperationalTransactionService
             if ($transaction->type === OperationalTransactionType::Expense && $transaction->settlement_type === 'accrued') {
                 $this->payableObligations->assertSourceCanReverse($transaction, $lockedSourceObligation);
             }
+            // A payment that paid out a staff advance: refuse before anything changes if recovery has started.
+            $advances = app(StaffAdvanceService::class);
+            $advance = $advances->lockForPaymentReversal($transaction);
             $this->reversal->reverse($transaction->journalEntry, $period, $date, $reason, $actor);
             $transaction->update(['status' => OperationalTransactionStatus::Reversed]);
+            if ($advance) {
+                $advances->reopenAfterPaymentReversal($advance, $transaction, $reason, $actor);
+            }
             if ($transaction->payable_obligation_id) {
                 $this->audit->log('payable_obligations.settlement_reversed', $transaction, ['payable_obligation_id' => $transaction->payable_obligation_id]);
             }
@@ -322,7 +348,7 @@ class OperationalTransactionService
             throw ValidationException::withMessages(['transaction_date' => 'No open accounting period exists for this date.']);
         }
         $financial = $transaction->financialAccount;
-        if ($financial && (! $financial->is_active || $financial->branch_id !== $transaction->branch_id)) {
+        if ($financial && (! $financial->is_active || ! $financial->usableIn((int) $transaction->branch_id))) {
             throw ValidationException::withMessages(['financial_account_id' => 'The selected cash or bank account is unavailable for this branch.']);
         }
         if ($transaction->type === OperationalTransactionType::Donation && (! $transaction->donationCategory?->is_active || ! $transaction->donationCategory?->income_account_id)) {
@@ -433,7 +459,7 @@ class OperationalTransactionService
             throw ValidationException::withMessages(['financial_account_id' => 'A cash or bank account is required when an expense is paid now.']);
         }
         $financial = filled($data['financial_account_id'] ?? null) ? FinancialAccount::query()->with('account')->findOrFail($data['financial_account_id']) : null;
-        if ($financial && ($financial->branch_id !== $branch->id || ! $financial->is_active)) {
+        if ($financial && (! $financial->usableIn($branch->id) || ! $financial->is_active)) {
             throw ValidationException::withMessages(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
         }
         if ($financial && (! $financial->account || $financial->account->account_type->value !== 'asset' || ! $financial->account->is_postable || ! $financial->account->is_active)) {
@@ -476,9 +502,13 @@ class OperationalTransactionService
         if (filled($data['vendor_id'] ?? null) && (int) $data['vendor_id'] !== (int) $bill->vendor_id) {
             throw ValidationException::withMessages(['vendor_id' => 'The vendor must be the vendor of the selected purchase bill.']);
         }
+        // A vendor payment always debits the bill's payable ledger; a different one sent with it is refused, not ignored.
+        if (filled($data['contra_account_id'] ?? null) && (int) $data['contra_account_id'] !== (int) $bill->payable_account_id) {
+            throw ValidationException::withMessages(['contra_account_id' => 'A vendor payment debits the payable ledger of its purchase bill.']);
+        }
         $data['vendor_id'] = $bill->vendor_id;
         // A locking read: a plain read could miss payments committed while this transaction waited for the bill.
-        $reserved = $bill->payments()->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value])->lockForUpdate()->get(['id', 'amount'])
+        $reserved = $bill->reservingPayments()->lockForUpdate()->get(['id', 'amount'])
             ->reduce(fn (BigDecimal $sum, OperationalTransaction $payment): BigDecimal => $sum->plus(AccountingDecimal::of($payment->amount)), BigDecimal::zero()->toScale(4));
         if ($reserved->plus($amount)->isGreaterThan(AccountingDecimal::of($bill->total_amount))) {
             throw ValidationException::withMessages(['amount' => 'Payment exceeds the bill outstanding amount.']);
@@ -542,6 +572,112 @@ class OperationalTransactionService
     private function needsDisbursement(OperationalTransaction $transaction): bool
     {
         return $transaction->type->requiresDisbursement() || ($transaction->type === OperationalTransactionType::Expense && $transaction->settlement_type === 'paid');
+    }
+
+    private function guardTransactionFloat(OperationalTransaction $transaction): void
+    {
+        $this->guardFloat($transaction->type, $transaction->financial_account_id, (string) $transaction->amount, $transaction->id);
+        $this->guardPaymentLedger($transaction->type, $transaction->only(['branch_id', 'contra_account_id', 'payable_obligation_id', 'source_reference', 'settlement_type']), $transaction->id);
+    }
+
+    /**
+     * A cash, bank or petty cash payment may only debit a ledger that has its own settlement
+     * workflow through that workflow, so the workflow's outstanding checks always apply:
+     * - payables (accounts payable / purchase bill control mappings, and the payable ledger of any
+     *   purchase bill or accrued payable): only as the settlement of a validated payable obligation
+     *   (a purchase bill is paid as a vendor payment, which is not checked here);
+     * - salary payable (its mapping): only as the payment raised for a posted payroll run, linked to it;
+     * - a staff advance ledger (the component of any staff advance): only as the disbursement of that
+     *   approved, not yet disbursed advance of the branch, for its own ledger.
+     * The source reference is never taken from a request (only services set it) and is checked against
+     * the run or advance it names. Any other expense ledger must be approved for direct payment.
+     * An expense settled as paid takes money out of cash or bank too, so it is checked the same way;
+     * an accrued expense only records a payable and is not.
+     * Applied on create and at every later step; reversals do not pass through here.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function guardPaymentLedger(OperationalTransactionType $type, array $data, ?int $transactionId = null): void
+    {
+        $paysOut = in_array($type, [OperationalTransactionType::CashPayment, OperationalTransactionType::BankPayment, OperationalTransactionType::PettyCash], true)
+            || ($type === OperationalTransactionType::Expense && ($data['settlement_type'] ?? null) === 'paid');
+        if (! $paysOut || blank($data['contra_account_id'] ?? null)) {
+            return;
+        }
+        $contra = (int) $data['contra_account_id'];
+        $branchId = (int) $data['branch_id'];
+        $ids = fn ($values) => $values->filter()->map(fn ($id): int => (int) $id)->unique();
+        $salaryLedgers = $ids(AccountMapping::query()->where('mapping_key', AccountMappingKey::SalaryPayable->value)->pluck('account_id'));
+        $advanceLedgers = $ids(PayrollComponent::query()->where('type', PayrollComponentType::Deduction->value)->where('category', PayrollComponentCategory::Advance->value)->whereNotNull('account_id')->pluck('account_id')
+            ->merge(StaffAdvance::query()->join('payroll_components', 'payroll_components.id', '=', 'staff_advances.payroll_component_id')->distinct()->pluck('payroll_components.account_id')));
+        $payableLedgers = $ids(AccountMapping::query()->whereIn('mapping_key', [AccountMappingKey::AccountsPayable->value, AccountMappingKey::PurchaseBillControl->value])->pluck('account_id')
+            ->merge(PurchaseBill::query()->distinct()->pluck('payable_account_id'))->merge(PayableObligation::query()->distinct()->pluck('payable_account_id')));
+        $source = (string) ($data['source_reference'] ?? '');
+
+        if ($salaryLedgers->contains($contra) && preg_match('/^payroll_run:(\d+)$/', $source, $match) === 1) {
+            $run = PayrollRun::query()->find((int) $match[1]);
+            $linked = $transactionId === null || PayrollRunPayment::query()->where('payroll_run_id', (int) $match[1])->where('operational_transaction_id', $transactionId)->exists();
+            if ($run && (int) $run->branch_id === $branchId && in_array($run->status, [PayrollRunStatus::Posted, PayrollRunStatus::Paid], true) && $linked) {
+                return;
+            }
+        }
+        if ($advanceLedgers->contains($contra) && ($advanceId = StaffAdvanceService::advanceIdFrom($source)) !== null) {
+            $advance = StaffAdvance::query()->with('component')->find($advanceId);
+            $open = $advance?->status === StaffAdvanceStatus::Approved && ($advance->disbursement_transaction_id === null || ($transactionId !== null && (int) $advance->disbursement_transaction_id === $transactionId));
+            if ($advance && (int) $advance->branch_id === $branchId && (int) $advance->component?->account_id === $contra) {
+                if ($open) {
+                    return;
+                }
+                throw ValidationException::withMessages(['status' => 'This payment is for a staff advance that is no longer an approved, undisbursed advance of this amount, ledger and branch. It cannot be '.($transactionId === null ? 'created' : 'completed').'.']);
+            }
+        }
+        if ($payableLedgers->contains($contra) && filled($data['payable_obligation_id'] ?? null)) {
+            return;
+        }
+        if ($payableLedgers->contains($contra)) {
+            throw ValidationException::withMessages(['contra_account_id' => 'This is a payable ledger. Pay a purchase bill as a vendor payment, and an accrued payable through its settlement, from Payments.']);
+        }
+        if ($salaryLedgers->contains($contra)) {
+            throw ValidationException::withMessages(['contra_account_id' => 'Salary payable is paid only through the salary payment of a posted payroll run.']);
+        }
+        if ($advanceLedgers->contains($contra)) {
+            throw ValidationException::withMessages(['contra_account_id' => 'A staff advance ledger is paid only as the disbursement of an approved staff advance, from Payments.']);
+        }
+        $ledger = Account::query()->find($contra);
+        if ($ledger && $ledger->account_type->value === 'expense' && ! $ledger->direct_payment_eligible) {
+            throw ValidationException::withMessages(['contra_account_id' => 'This expense ledger is not approved for direct payment.']);
+        }
+    }
+
+    /**
+     * Petty cash float control, applied on create and at every step up to posting,
+     * on every screen. A petty cash voucher must pay from the cash account of an
+     * active imprest float of its branch and may not exceed what the float still
+     * holds (posted balance less other vouchers in approval or awaiting posting).
+     * No other transaction (payment, receipt or donation) may use a float's cash
+     * account, so a float is only spent through vouchers and only refilled through
+     * Imprest replenishment.
+     * The float row is locked, so concurrent vouchers are checked one after another.
+     */
+    private function guardFloat(OperationalTransactionType $type, ?int $financialAccountId, string $amount, ?int $exceptId = null): void
+    {
+        $financial = $financialAccountId ? FinancialAccount::query()->find($financialAccountId) : null;
+        $float = $financial ? $this->imprest->activeFloatFor($financial, true) : null;
+        if ($type === OperationalTransactionType::PettyCash) {
+            if (! $float) {
+                throw ValidationException::withMessages(['financial_account_id' => 'A petty cash voucher must be paid from the cash account of an active imprest float of its branch.']);
+            }
+            $available = $this->imprest->available($float, $exceptId);
+            if (AccountingDecimal::of($amount)->isGreaterThan($available)) {
+                throw ValidationException::withMessages(['amount' => 'This voucher exceeds the petty cash available in the float (PKR '.AccountingDecimal::string($available->isNegative() ? AccountingDecimal::of('0') : $available).' after vouchers awaiting posting). Replenish the float first.']);
+            }
+
+            return;
+        }
+        // Receipts and donations may not fund it either: a float is only refilled through Imprest replenishment.
+        if ($float) {
+            throw ValidationException::withMessages(['financial_account_id' => 'This cash account holds an imprest float: only petty cash vouchers may use it, and it is refilled through Imprest replenishment.']);
+        }
     }
 
     private function guardBranch(OperationalTransaction $transaction, User $actor): void

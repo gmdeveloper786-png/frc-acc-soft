@@ -36,7 +36,7 @@ class BankStatementController extends Controller
         return redirect()->route('bank-statements.show', $statement)->with('status', 'Statement stored privately. Map its columns to import the lines.');
     }
 
-    public function show(Request $request, BankStatement $bankStatement, ReconciliationService $reconciliations): View
+    public function show(Request $request, BankStatement $bankStatement, ReconciliationService $reconciliations, StatementImportService $statements): View
     {
         $reconciliations->authorizeAccount($bankStatement->financialAccount, $request->user(), 'bank_reconciliation.view');
         $lines = $bankStatement->isImported() ? $bankStatement->lines()->paginate(50) : null;
@@ -45,6 +45,8 @@ class BankStatementController extends Controller
             'statement' => $bankStatement->load(['financialAccount', 'branch', 'uploader']),
             'lines' => $lines,
             'dateFormats' => StatementImportService::DATE_FORMATS,
+            'canDiscard' => $statements->canDiscard($bankStatement, $request->user()),
+            'retained' => $statements->isRetained($bankStatement),
         ]);
     }
 
@@ -65,6 +67,6 @@ class BankStatementController extends Controller
     /** @return Collection<int, FinancialAccount> */
     private function bankAccounts(Request $request, BranchAccess $access): Collection
     {
-        return FinancialAccount::query()->with('branch')->where('type', 'bank')->whereIn('branch_id', $access->scope($request->user())->select('id'))->orderBy('name')->get();
+        return FinancialAccount::query()->with('branch')->where('type', 'bank')->bookVisibleTo($request->user(), $access->scope($request->user())->select('id'))->orderBy('name')->get();
     }
 }

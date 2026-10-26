@@ -65,7 +65,7 @@ beforeEach(function () {
     $this->branch = Branch::factory()->create(['status' => 'publish']);
     $this->otherBranch = Branch::factory()->create(['status' => 'publish']);
     $this->cashLedger = Account::factory()->create();
-    $this->expenseLedger = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
+    $this->expenseLedger = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true, 'direct_payment_eligible' => true]);
     $this->payableLedger = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => $this->cashLedger]);
     $this->vendor = Vendor::factory()->create();

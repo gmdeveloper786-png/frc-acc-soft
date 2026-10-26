@@ -161,6 +161,24 @@ class StatementImportService
     }
 
     /**
+     * A statement is kept for the audit trail once any reconciliation refers to
+     * it (cancelled ones included) or any of its lines is matched or ignored.
+     */
+    public function isRetained(BankStatement $statement): bool
+    {
+        return BankStatementLine::query()->where('bank_statement_id', $statement->id)->where('status', '!=', BankStatementLine::UNMATCHED)->exists()
+            || BankReconciliation::query()->where('bank_statement_id', $statement->id)->exists();
+    }
+
+    /** Whether the user may remove this statement now, for the screen. discard() checks everything again under its lock. */
+    public function canDiscard(BankStatement $statement, User $actor): bool
+    {
+        return $actor->can('bank_reconciliation.prepare') && $statement->financialAccount->type === 'bank'
+            && $statement->financialAccount->bookVisibleTo($actor, $this->branchAccess->canAccess($actor, $statement->financialAccount->branch))
+            && ! $this->isRetained($statement);
+    }
+
+    /**
      * Abandon a pending upload, or withdraw an imported statement none of whose
      * lines has been matched or ignored. The stored file is deleted.
      */
@@ -169,9 +187,7 @@ class StatementImportService
         $this->authorize($statement->financialAccount, $actor);
         DB::transaction(function () use ($statement, $actor): void {
             $statement = BankStatement::query()->lockForUpdate()->findOrFail($statement->id);
-            $used = BankStatementLine::query()->where('bank_statement_id', $statement->id)->where('status', '!=', BankStatementLine::UNMATCHED)->exists()
-                || BankReconciliation::query()->where('bank_statement_id', $statement->id)->exists();
-            if ($used) {
+            if ($this->isRetained($statement)) {
                 throw ValidationException::withMessages(['statement' => 'This statement is used by a reconciliation and cannot be removed.']);
             }
             $this->audit->log($statement->isImported() ? 'bank_statement.withdrawn' : 'bank_statement.cancelled', $statement, [
@@ -185,7 +201,8 @@ class StatementImportService
 
     private function authorize(FinancialAccount $account, User $actor): void
     {
-        abort_unless($actor->can('bank_reconciliation.prepare') && $account->type === 'bank' && $this->branchAccess->canAccess($actor, $account->branch), 403);
+        // A shared bank account's statement holds every branch's entries, so it needs access to every branch.
+        abort_unless($actor->can('bank_reconciliation.prepare') && $account->type === 'bank' && $account->bookVisibleTo($actor, $this->branchAccess->canAccess($actor, $account->branch)), 403);
     }
 
     private function refuseDuplicate(FinancialAccount $account, string $hash): void

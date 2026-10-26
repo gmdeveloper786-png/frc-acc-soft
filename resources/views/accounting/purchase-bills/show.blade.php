@@ -42,7 +42,15 @@
             @can('purchase_bills.post')<form method="POST" action="{{ route('purchase-bills.post', $purchaseBill) }}">@csrf<button class="btn btn-primary w-100" data-confirm="Post payable journal?">Post</button></form>@endcan
         @endif
         @if($purchaseBill->status->value === 'posted' && (float) $purchaseBill->outstandingAmount() > 0)
-            @can('vendor_payments.create')<a class="btn btn-outline-primary" href="{{ route('transactions.create', ['type' => 'vendor_payment', 'bill' => $purchaseBill->id]) }}">Record vendor payment</a>@endcan
+            {{-- Only what is not already held by a payment in approval can be paid again. --}}
+            @php($availableToPay = $purchaseBill->availableToPayAmount())
+            @can('vendor_payments.create')
+                @if((float) $availableToPay > 0)
+                    <a class="btn btn-outline-primary" href="{{ route('payments.create', ['bill' => $purchaseBill->id]) }}">Record vendor payment</a>
+                @else
+                    <p class="text-muted mb-0" data-bill-fully-reserved>The outstanding balance is already held by payments awaiting approval, disbursement or posting. A new payment can be recorded if one of them is rejected or reversed.</p>
+                @endif
+            @endcan
         @endif
     </div></div></div></div>
 </div>

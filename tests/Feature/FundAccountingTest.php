@@ -49,8 +49,8 @@ beforeEach(function () {
     $this->equipment = Account::factory()->create(['code' => '121101', 'name' => 'Equipment']);
     $this->donations = Account::factory()->create(['code' => '431001', 'name' => 'Donations', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
     $this->grantIncome = Account::factory()->create(['code' => '432001', 'name' => 'Grant Income', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
-    $this->salaries = Account::factory()->create(['code' => '511001', 'name' => 'Salaries', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
-    $this->medicine = Account::factory()->create(['code' => '512001', 'name' => 'Patient Medicine', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->salaries = Account::factory()->create(['code' => '511001', 'name' => 'Salaries', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'direct_payment_eligible' => true]);
+    $this->medicine = Account::factory()->create(['code' => '512001', 'name' => 'Patient Medicine', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'direct_payment_eligible' => true]);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->lahore->id, 'account_id' => $this->cashLedger->id]);
 });
 
@@ -234,7 +234,7 @@ test('manual journal lines carry an optional fund through posting and reversal',
 
 function fundPayment(object $test, string $type, Account $ledger, ?Fund $fund): array
 {
-    return ['type' => $type, 'branch_id' => $test->lahore->id, 'transaction_date' => '2026-01-15', 'amount' => '50.0000', 'financial_account_id' => $test->cash->id, 'contra_account_id' => $ledger->id, 'fund_id' => $fund?->id, 'narration' => 'Fund-tagged charge'];
+    return ['type' => $type, 'branch_id' => $test->lahore->id, 'transaction_date' => '2026-01-15', 'amount' => '50.0000', 'financial_account_id' => $type === 'petty_cash' ? fundedPettyCashAccount($test->lahore->id, '1000.0000')->id : $test->cash->id, 'contra_account_id' => $ledger->id, 'fund_id' => $fund?->id, 'narration' => 'Fund-tagged charge'];
 }
 
 function fundJournalData(object $test, Account $ledger, ?Fund $fund, string $narration = 'Fund journal'): array

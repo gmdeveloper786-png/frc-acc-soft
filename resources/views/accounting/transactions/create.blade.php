@@ -14,8 +14,22 @@
 <div class="col-md-4"><label class="form-label">Branch</label><select class="form-select" id="transaction-branch" name="branch_id" required><option value="">Select branch</option>@foreach($branches as $branch)<option value="{{ $branch->id }}" @selected(old('branch_id')==$branch->id)>{{ $branch->name }}</option>@endforeach</select></div>
 @endif
 <div class="col-md-4"><label class="form-label">Date</label><input class="form-control" type="date" name="transaction_date" value="{{ old('transaction_date',today()->toDateString()) }}" required></div><div class="col-md-4"><label class="form-label">Amount (PKR)</label><input class="form-control text-end" name="amount" value="{{ old('amount') }}" required></div>
-@if($type->value==='expense')<div class="col-md-4"><label class="form-label">Settlement</label><select class="form-select" id="expense-settlement" name="settlement_type"><option value="paid" @selected(old('settlement_type', 'paid')==='paid')>Paid now</option><option value="accrued" @selected(old('settlement_type')==='accrued')>Record as payable</option></select></div>@endif
-<div class="col-md-6" id="financial-account-container" @if($type->value==='expense' && old('settlement_type')==='accrued') hidden @endif><label class="form-label">Cash / Bank account</label><select class="form-select @error('financial_account_id') is-invalid @enderror" id="transaction-financial-account" name="financial_account_id" @if($type->value==='expense' && old('settlement_type')==='accrued') disabled @elseif($type->value==='expense') required @endif><option value="">Select account</option>@foreach($financialAccounts as $fa)<option value="{{ $fa->id }}" data-branch-id="{{ $fa->branch_id }}" data-account-type="{{ $fa->type }}" @selected(old('financial_account_id')==$fa->id)>{{ $fa->name }} ({{ ucfirst($fa->type) }})</option>@endforeach</select>@error('financial_account_id')<div class="invalid-feedback">{{ $message }}</div>@enderror</div>
+@if($type->value==='expense')
+<div class="col-md-4">
+    <label class="form-label">Settlement</label>
+    <select class="form-select" id="expense-settlement" name="settlement_type">
+        <option value="accrued" selected>Record as payable</option>
+    </select>
+    <div class="form-text">
+        @if($canDirectPay ?? false)
+            To pay directly via Bank, Cash, or Petty Cash, use <a href="{{ route('payments.create') }}">Unified Payments</a>.
+        @else
+            Direct payments must be created from Unified Payments.
+        @endif
+    </div>
+</div>
+@endif
+<div class="col-md-6" id="financial-account-container" @if($type->value==='expense') hidden @endif><label class="form-label">Cash / Bank account</label><select class="form-select @error('financial_account_id') is-invalid @enderror" id="transaction-financial-account" name="financial_account_id" @if($type->value==='expense') disabled @endif><option value="">Select account</option>@foreach($financialAccounts as $fa)<option value="{{ $fa->id }}" data-branch-id="{{ $fa->branch_id }}" data-shared="{{ $fa->isShared() ? '1' : '0' }}" data-account-type="{{ $fa->type }}" @selected(old('financial_account_id')==$fa->id)>{{ $fa->name }} ({{ ucfirst($fa->type) }}{{ $fa->isShared() ? ' — all branches' : '' }})</option>@endforeach</select>@error('financial_account_id')<div class="invalid-feedback">{{ $message }}</div>@enderror</div>
 @if(!in_array($type->value,['donation','vendor_payment']))<div class="col-md-6"><label class="form-label">Contra / expense account</label><select class="form-select" name="contra_account_id"><option value="">Use GL mapping default</option>@foreach($ledgers as $ledger)<option value="{{ $ledger->id }}">{{ $ledger->code }} — {{ $ledger->name }}</option>@endforeach</select></div>@endif
 @if($type->value==='expense')<div class="col-md-6"><label class="form-label">Payable account (for accrued)</label><select class="form-select" name="payable_account_id"><option value="">Use Accounts Payable mapping</option>@foreach($ledgers as $ledger)<option value="{{ $ledger->id }}">{{ $ledger->code }} — {{ $ledger->name }}</option>@endforeach</select></div>@endif
 @if($type->value==='donation')<div class="col-md-6"><label class="form-label">Donation category</label><select class="form-select" name="donation_category_id" required>@foreach($donationCategories as $cat)<option value="{{ $cat->id }}">{{ $cat->name }}{{ $cat->income_account_id?'':' (mapping required)' }}</option>@endforeach</select></div>@endif
@@ -69,13 +83,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const available = selectedBranchId !== ''
-                && option.dataset.branchId === selectedBranchId
+                && (option.dataset.branchId === selectedBranchId || option.dataset.shared === '1')
                 && (!requiredAccountType || option.dataset.accountType === requiredAccountType);
             option.hidden = !available;
             option.disabled = !available;
         });
 
-        if (financialAccount.selectedOptions[0]?.dataset.branchId !== selectedBranchId) {
+        if (financialAccount.selectedOptions[0]?.disabled) {
             financialAccount.value = '';
         }
     };

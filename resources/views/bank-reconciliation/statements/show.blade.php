@@ -14,12 +14,14 @@
     };
 @endphp
 @section('title','Bank Statement #'.$statement->id) @section('eyebrow','Bank statement') @section('page-title',$statement->isImported() ? 'Bank Statement' : 'Map Statement Columns')
-@section('page-description',$account->name.' • '.$statement->branch->name.' • '.$statement->original_filename.' • '.$statement->statusLabel())
+@section('page-description',$account->name.' • '.($account->isShared() ? 'All Branches — Shared (custodian: '.$statement->branch->name.')' : $statement->branch->name).' • '.$statement->original_filename.' • '.$statement->statusLabel())
 @section('page-actions')
 <div class="d-flex gap-2">
-    @can('bank_reconciliation.prepare')
+    @if($canDiscard)
         <form method="POST" action="{{ route('bank-statements.destroy', $statement) }}" data-submit-once>@csrf @method('DELETE')<button class="btn btn-outline-danger" data-confirm="Remove this statement and delete its stored file?">{{ $statement->isImported() ? 'Withdraw statement' : 'Cancel upload' }}</button></form>
-    @endcan
+    @elseif($retained)
+        <span class="text-muted small align-self-center">Used by a reconciliation; retained for audit history.</span>
+    @endif
     <a class="btn btn-outline-primary" href="{{ route('bank-statements.index') }}">Back</a>
 </div>
 @endsection

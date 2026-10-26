@@ -57,7 +57,10 @@ class ReconciliationReport
             $rows,
             [
                 'Bank account' => $account->name.($account->maskedNumber() ? ' ('.$account->maskedNumber().')' : ''),
-                'Branch' => $account->branch->name,
+                // A shared account's reconciliation covers every branch; its branch is only the custodian.
+                ...($account->isShared()
+                    ? ['Account scope' => 'All Branches — Shared', 'Custodian branch' => $account->branch->name]
+                    : ['Branch' => $account->branch->name]),
                 'Statement date' => $reconciliation->statement_date->format('d M Y'),
                 'Status' => $reconciliation->statusLabel(),
             ],

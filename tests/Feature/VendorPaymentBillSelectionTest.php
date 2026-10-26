@@ -2,6 +2,7 @@
 
 use App\Enums\AccountingPeriodStatus;
 use App\Enums\FiscalYearStatus;
+use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
 use App\Enums\SystemRole;
 use App\Models\Account;
@@ -9,15 +10,20 @@ use App\Models\AccountingPeriod;
 use App\Models\Branch;
 use App\Models\FinancialAccount;
 use App\Models\FiscalYear;
+use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
+use App\Models\PayeeType;
+use App\Models\PaymentPurpose;
 use App\Models\PurchaseBill;
 use App\Models\User;
 use App\Models\Vendor;
+use App\Services\OperationalTransactionService;
 use App\Services\PurchaseBillService;
 use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\DonationCategorySeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\VoucherTypeSeeder;
+use Illuminate\Validation\ValidationException;
 
 beforeEach(function () {
     $this->seed([AppSettingSeeder::class, RolePermissionSeeder::class, VoucherTypeSeeder::class, DonationCategorySeeder::class]);
@@ -29,7 +35,7 @@ beforeEach(function () {
     AccountingPeriod::factory()->create(['fiscal_year_id' => $year, 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
     $this->branchA = Branch::factory()->create(['status' => 'publish', 'name' => 'Vendor Pay Branch A']);
     $this->branchB = Branch::factory()->create(['status' => 'publish', 'name' => 'Vendor Pay Branch B']);
-    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
+    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true, 'direct_payment_eligible' => true]);
     $this->payable = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->bankA = FinancialAccount::factory()->create(['type' => 'bank', 'branch_id' => $this->branchA, 'account_id' => Account::factory()->create(), 'name' => 'Branch A Bank']);
     $this->bankB = FinancialAccount::factory()->create(['type' => 'bank', 'branch_id' => $this->branchB, 'account_id' => Account::factory()->create(), 'name' => 'Branch B Bank']);
@@ -176,4 +182,122 @@ test('forms that are not linked to a bill keep their branch and vendor selectors
     ])->assertSessionHasNoErrors();
     $payment = OperationalTransaction::query()->latest('id')->firstOrFail();
     expect((int) $payment->vendor_id)->toBe($this->vendorB->id)->and($payment->purchase_bill_id)->toBeNull();
+});
+
+test('pay on a purchase bill opens the unified payment screen on what is still free to pay, and the vendor payment rules still apply', function () {
+    $this->get(route('purchase-bills.show', $this->billA))->assertOk()->assertSee('href="'.e(route('payments.create', ['bill' => $this->billA->id])).'"', false);
+    $journals = JournalEntry::query()->count();
+    $prefilled = fn (PurchaseBill $bill) => $this->get(route('payments.create', ['bill' => $bill->id]))->assertOk()->getContent();
+    expect($prefilled($this->billA))->toContain('data-prefill-bill="'.$this->billA->id.'"')->toContain('name="amount" value="500.0000"')
+        ->toContain('<option value="'.$this->branchA->id.'" selected')
+        ->and(preg_match('/<option value="'.$this->vendorA->id.'"[^>]*selected/', $prefilled($this->billA)))->toBe(1)
+        ->and(OperationalTransaction::query()->count())->toBe(0);
+
+    $pay = fn (array $overrides = []) => $this->post(route('payments.store'), ['payment_source' => 'bank', 'payment_purpose_id' => PaymentPurpose::query()->where('code', 'vendor_bill')->value('id'),
+        'payee_type_id' => PayeeType::query()->where('code', 'vendor')->value('id'), 'payee_vendor_id' => $this->vendorA->id, 'purchase_bill_id' => $this->billA->id,
+        'branch_id' => $this->branchA->id, 'transaction_date' => '2026-01-15', 'financial_account_id' => $this->bankA->id, 'amount' => '200', ...$overrides]);
+    // A partial payment, then the prefill offers only what is left after it (it reserves the bill while in approval).
+    $pay()->assertSessionHasNoErrors()->assertRedirect();
+    $payment = OperationalTransaction::query()->sole();
+    expect($payment->type)->toBe(OperationalTransactionType::VendorPayment)->and($payment->purchase_bill_id)->toBe($this->billA->id)
+        ->and($payment->vendor_id)->toBe($this->vendorA->id)->and($prefilled($this->billA))->toContain('name="amount" value="300.0000"');
+    // Its detail shows the bill it pays and the bill's payable ledger it debits (a vendor payment stores no contra of its own).
+    expect($payment->contra_account_id)->toBeNull();
+    $this->get(route('transactions.show', $payment))->assertOk()->assertSee('Linked purchase bill')
+        ->assertSee('href="'.route('purchase-bills.show', $this->billA).'"', false)->assertSee('VP-BILL-A')
+        ->assertSee($this->payable->code.' '.$this->payable->name)->assertSee('Payable ledger of the purchase bill');
+
+    // Tampered amount, vendor, branch and bill are refused; nothing is created and nothing is journalled.
+    $pay(['amount' => '300.01'])->assertSessionHasErrors();
+    $pay(['payee_vendor_id' => $this->vendorB->id])->assertSessionHasErrors();
+    $pay(['purchase_bill_id' => $this->billB->id])->assertSessionHasErrors();
+    $pay(['branch_id' => $this->branchB->id, 'financial_account_id' => $this->bankB->id])->assertSessionHasErrors();
+    expect(OperationalTransaction::query()->count())->toBe(1);
+
+    // Once the rest is committed, the bill is no longer offered for payment.
+    $pay(['amount' => '300'])->assertSessionHasNoErrors();
+    expect($prefilled($this->billA))->toContain('data-prefill-bill=""')->toContain('name="amount" value=""')
+        ->and(JournalEntry::query()->count())->toBe($journals);
+
+    // A user of branch B is not prefilled with branch A's bill and cannot pay it.
+    $clerk = User::factory()->create();
+    $clerk->assignRole(SystemRole::Accountant->value);
+    $clerk->branches()->attach($this->branchB);
+    $this->actingAs($clerk)->get(route('payments.create', ['bill' => $this->billA->id]))->assertOk()->assertSee('data-prefill-bill=""', false);
+    expect(OperationalTransaction::query()->count())->toBe(2);
+});
+
+test('the bill offers a payment only while part of it is free, and tampered or cross-branch bill payments create nothing', function () {
+    $engine = app(OperationalTransactionService::class);
+    $journals = JournalEntry::query()->count();
+    $payLink = 'href="'.e(route('payments.create', ['bill' => $this->billA->id])).'"';
+
+    // Cross-branch: a branch B user cannot pay branch A's bill through either screen, whatever branch is sent.
+    $clerk = User::factory()->create();
+    $clerk->assignRole(SystemRole::Accountant->value);
+    $clerk->branches()->attach($this->branchB);
+    $this->actingAs($clerk);
+    $unified = ['payment_source' => 'bank', 'payment_purpose_id' => PaymentPurpose::query()->where('code', 'vendor_bill')->value('id'), 'payee_type_id' => PayeeType::query()->where('code', 'vendor')->value('id'),
+        'payee_vendor_id' => $this->vendorA->id, 'purchase_bill_id' => $this->billA->id, 'transaction_date' => '2026-01-15', 'amount' => '100'];
+    $this->post(route('payments.store'), [...$unified, 'branch_id' => $this->branchA->id, 'financial_account_id' => $this->bankA->id]);
+    $this->post(route('payments.store'), [...$unified, 'branch_id' => $this->branchB->id, 'financial_account_id' => $this->bankB->id]);
+    $this->post(route('transactions.store'), vendorPayPayload($this, $this->billA, ['branch_id' => $this->branchB->id, 'financial_account_id' => $this->bankB->id]));
+    $this->post(route('transactions.store'), vendorPayPayload($this, $this->billA));
+    expect(OperationalTransaction::query()->count())->toBe(0);
+
+    // Tampered vendor, payable ledger, bill branch and amount are refused for an authorized user too.
+    $this->actingAs($this->maker);
+    $this->post(route('transactions.store'), vendorPayPayload($this, $this->billA, ['vendor_id' => $this->vendorB->id]))->assertSessionHasErrors('vendor_id');
+    $this->post(route('transactions.store'), vendorPayPayload($this, $this->billA, ['contra_account_id' => $this->expense->id]))->assertSessionHasErrors('contra_account_id');
+    $this->post(route('transactions.store'), vendorPayPayload($this, $this->billA, ['branch_id' => $this->branchB->id, 'financial_account_id' => $this->bankB->id]))->assertSessionHasErrors('purchase_bill_id');
+    $this->post(route('transactions.store'), vendorPayPayload($this, $this->billA, ['amount' => '500.0001']))->assertSessionHasErrors('amount');
+    expect(OperationalTransaction::query()->count())->toBe(0)->and(JournalEntry::query()->count())->toBe($journals);
+
+    // Valid payments still work; once they hold the whole bill, the bill explains instead of offering a payment.
+    $first = $engine->create(vendorPayPayload($this, $this->billA, ['amount' => '300']), $this->maker);
+    $this->get(route('purchase-bills.show', $this->billA))->assertSee($payLink, false)->assertDontSee('data-bill-fully-reserved', false);
+    $engine->create(vendorPayPayload($this, $this->billA, ['amount' => '200', 'contra_account_id' => $this->payable->id]), $this->maker);
+    expect($this->billA->fresh()->availableToPayAmount())->toBe('0.0000');
+    $this->get(route('purchase-bills.show', $this->billA))->assertDontSee($payLink, false)->assertSee('already held by payments awaiting approval');
+    expect(fn () => $engine->create(vendorPayPayload($this, $this->billA, ['amount' => '0.01']), $this->maker))->toThrow(ValidationException::class, 'exceeds');
+
+    // Returning a payment releases its share, and the bill can be paid again for that much.
+    $engine->submit($first, $this->maker);
+    $engine->reject($first->fresh(), 'Wrong bank account chosen', $this->checker);
+    expect($this->billA->fresh()->availableToPayAmount())->toBe('300.0000');
+    $this->get(route('purchase-bills.show', $this->billA))->assertSee($payLink, false);
+    expect(JournalEntry::query()->count())->toBe($journals);
+});
+
+test('a payment returned for correction releases its share, but resubmitting it is re-checked, and a reversal releases a posted share', function () {
+    $engine = app(OperationalTransactionService::class);
+    $returned = $engine->create(vendorPayPayload($this, $this->billA, ['amount' => '500']), $this->maker);
+    $engine->submit($returned, $this->maker);
+    expect($this->billA->fresh()->availableToPayAmount())->toBe('0.0000');
+
+    // "Return for correction" is the reject action: the payment becomes rejected and stops holding the bill.
+    $engine->reject($returned->fresh(), 'Attach the vendor invoice', $this->checker);
+    expect($returned->fresh()->status)->toBe(OperationalTransactionStatus::Rejected)->and($this->billA->fresh()->availableToPayAmount())->toBe('500.0000');
+
+    // If another payment takes that share meanwhile, the returned one cannot be resubmitted, so the bill is never paid twice.
+    $replacement = $engine->create(vendorPayPayload($this, $this->billA, ['amount' => '500']), $this->maker);
+    expect(fn () => $engine->submit($returned->fresh(), $this->maker))->toThrow(ValidationException::class, 'exceeds')
+        ->and($returned->fresh()->status)->toBe(OperationalTransactionStatus::Rejected);
+
+    // The replacement is paid and posted; reversing it releases the bill again and the returned payment may then go ahead.
+    $engine->submit($replacement, $this->maker);
+    $engine->approve($replacement->fresh(), $this->checker);
+    $engine->disburse($replacement->fresh(), $this->checker);
+    $posted = $engine->post($replacement->fresh(), $this->checker);
+    expect($this->billA->fresh()->availableToPayAmount())->toBe('0.0000')->and($this->billA->fresh()->outstandingAmount())->toBe('0.0000');
+    $engine->reverse($posted->fresh(), AccountingPeriod::query()->firstOrFail(), '2026-01-25', 'Paid from the wrong bank', $this->checker);
+    expect($this->billA->fresh()->availableToPayAmount())->toBe('500.0000')->and($this->billA->fresh()->outstandingAmount())->toBe('500.0000');
+    // The reversing journal swaps the payment's lines: the bank is debited back and the bill's payable credited again.
+    $reversal = JournalEntry::query()->where('reversal_of_id', $posted->journal_entry_id)->sole();
+    $lines = fn (JournalEntry $journal) => $journal->lines()->get()->map(fn ($line) => [$line->account_id, (string) $line->debit, (string) $line->credit])->sortBy(0)->values()->all();
+    expect($lines($reversal))->toBe(collect($lines($posted->fresh()->journalEntry))->map(fn ($line) => [$line[0], $line[2], $line[1]])->all())
+        ->and(fn () => $engine->reverse($posted->fresh(), AccountingPeriod::query()->firstOrFail(), '2026-01-26', 'Second reversal', $this->checker))->toThrow(ValidationException::class, 'Only a posted transaction');
+    $this->get(route('purchase-bills.show', $this->billA))->assertSee('href="'.e(route('payments.create', ['bill' => $this->billA->id])).'"', false);
+    $this->get(route('payments.create', ['bill' => $this->billA->id]))->assertSee('name="amount" value="500.0000"', false);
+    expect($engine->submit($returned->fresh(), $this->maker)->status)->toBe(OperationalTransactionStatus::Submitted);
 });

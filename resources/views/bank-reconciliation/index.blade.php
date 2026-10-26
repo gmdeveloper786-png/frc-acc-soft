@@ -3,7 +3,8 @@
 @section('page-actions')
 <div class="d-flex gap-2">
     <a class="btn btn-outline-primary" href="{{ route('bank-statements.index') }}">Bank statements</a>
-    @can('bank_reconciliation.prepare')<a class="btn btn-primary" href="{{ route('bank-reconciliations.create') }}">+ New reconciliation</a>@endcan
+    {{-- Offered only with the permission and at least one bank account this user may reconcile. --}}
+    @if(auth()->user()->can('bank_reconciliation.prepare') && $accounts->isNotEmpty())<a class="btn btn-primary" href="{{ route('bank-reconciliations.create') }}">+ New reconciliation</a>@endif
 </div>
 @endsection
 @section('content')
@@ -11,13 +12,13 @@
     $amount = fn ($value) => \App\Services\BankReconciliation\Amount::format($value);
 @endphp
 <section class="surface-card mb-4">
-    <div class="card-heading"><div><span class="section-kicker">One bank account per ledger and branch</span><h2>Bank accounts</h2></div></div>
+    <div class="card-heading"><div><span class="section-kicker">Bank Accounts — Branch-Specific &amp; Shared</span><h2>Bank accounts</h2></div></div>
     <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Bank account</th><th>Branch</th><th>Bank</th><th>Last approved statement date</th><th>In progress</th><th>Actions</th></tr></thead><tbody>
     @forelse($accounts as $account)
         @php $state = $latest->get($account->id); @endphp
         <tr>
             <td>{{ $account->name }}@if($account->maskedNumber())<span class="table-subtext">{{ $account->maskedNumber() }}</span>@endif</td>
-            <td>{{ $account->branch->name }}</td>
+            <td>@if($account->isShared())<span class="status-badge neutral">All Branches — Shared</span><span class="table-subtext">Custodian: {{ $account->branch->name }}</span>@else{{ $account->branch->name }}@endif</td>
             <td>{{ $account->bank_name ?? '—' }}</td>
             <td>{{ $state?->last_approved ? \Illuminate\Support\Carbon::parse($state->last_approved)->format('d M Y') : 'Never reconciled' }}</td>
             <td>@if($state?->open_id)<a href="{{ route('bank-reconciliations.show', $state->open_id) }}">Open reconciliation</a>@else — @endif</td>
@@ -42,7 +43,7 @@
         <tr>
             <td>{{ $reconciliation->statement_date->format('d M Y') }}</td>
             <td>{{ $reconciliation->financialAccount->name }}</td>
-            <td>{{ $reconciliation->branch->name }}</td>
+            <td>@if($reconciliation->financialAccount->isShared())<span class="status-badge neutral">All Branches — Shared</span><span class="table-subtext">Custodian: {{ $reconciliation->branch->name }}</span>@else{{ $reconciliation->branch->name }}@endif</td>
             <td class="text-end font-monospace">{{ $appSettings['currency_code'] }} {{ $amount($reconciliation->statement_closing_balance) }}</td>
             <td><span class="status-badge {{ $reconciliation->badge() }}">{{ $reconciliation->statusLabel() }}</span></td>
             <td>{{ $reconciliation->preparer?->name ?? '—' }}</td>

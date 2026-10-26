@@ -14,6 +14,9 @@ use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\OperationalTransaction;
 use App\Models\PayableObligation;
+use App\Models\Payee;
+use App\Models\PayeeType;
+use App\Models\PaymentPurpose;
 use App\Models\User;
 use App\Services\OperationalTransactionService;
 use Database\Seeders\AppSettingSeeder;
@@ -215,4 +218,47 @@ test('payables screen and every export retain the accrued expense reference with
         ->and($pdf)->toContain('(Accrued expense #'.$obligation->source_expense_transaction_id.' -')
         ->toContain('(P5-UAT-EXP-001')
         ->toContain('(3,000.00)');
+});
+
+test('settle payable opens the unified payment screen on the remaining outstanding, and a vendorless payable is paid to a directory payee', function () {
+    $expense = accruedExpenseForSettlement($this);
+    $obligation = PayableObligation::query()->sole();
+    postSettlement($this, settlementPayload($this, $obligation, '2000.0000', (string) str()->uuid()));
+    $this->actingAs($this->maker)->get(route('transactions.show', $expense))->assertOk()
+        ->assertSee('href="'.route('payments.create', ['obligation' => $obligation->id]).'"', false)->assertDontSee(route('payable-obligations.settle.create', $obligation));
+
+    // Opening the screen saves nothing; it starts on the payable's branch, purpose, payable and remaining PKR 1,000.
+    $transactions = OperationalTransaction::query()->count();
+    $purposeId = PaymentPurpose::query()->where('code', 'accrued_payable')->value('id');
+    $form = $this->get(route('payments.create', ['obligation' => $obligation->id]))->assertOk()->getContent();
+    expect(OperationalTransaction::query()->count())->toBe($transactions)
+        ->and($form)->toContain('data-prefill-obligation="'.$obligation->id.'"')->toContain('data-prefill-purpose="'.$purposeId.'"')
+        ->toContain('name="amount" value="1000.0000"')->toContain('<option value="'.$this->branch->id.'" selected')
+        ->toContain('payable_obligation_id')->not->toContain('name="payee_vendor_id" value="');
+
+    // A payable outside the user's branches is ignored, not prefilled.
+    $other = User::factory()->create();
+    $other->assignRole(SystemRole::Accountant->value);
+    $other->branches()->attach(Branch::factory()->create(['status' => 'publish']));
+    $this->actingAs($other)->get(route('payments.create', ['obligation' => $obligation->id]))->assertOk()->assertSee('data-prefill-obligation=""', false)->assertDontSee('value="1000.0000"', false);
+    $this->actingAs($other)->get(route('payable-obligations.settle.create', $obligation))->assertForbidden();
+
+    // Submitted through the unified screen: a directory payee, at most the outstanding, against the payable ledger.
+    $type = PayeeType::query()->create(['name' => 'Landlord', 'code' => 'landlord', 'source_kind' => 'directory', 'is_active' => true]);
+    $payee = Payee::query()->create(['payee_type_id' => $type->id, 'name' => 'Gulshan Properties', 'entity_kind' => 'organization', 'is_active' => true]);
+    $payload = ['payment_source' => 'cash', 'payment_purpose_id' => $purposeId, 'branch_id' => $this->branch->id, 'transaction_date' => '2026-01-20',
+        'financial_account_id' => $this->cash->id, 'payable_obligation_id' => $obligation->id, 'payee_type_id' => $type->id, 'payee_id' => $payee->id,
+        'settlement_request_token' => (string) str()->uuid(), 'narration' => 'Rent settlement'];
+    $this->actingAs($this->maker)->post(route('payments.store'), [...$payload, 'amount' => '1000.01'])->assertSessionHasErrors();
+    $this->post(route('payments.store'), [...$payload, 'amount' => '1000', 'payee_type_id' => null, 'payee_id' => null])->assertSessionHasErrors();
+    $this->post(route('payments.store'), [...$payload, 'amount' => '1000'])->assertSessionHasNoErrors()->assertRedirect();
+    $payment = OperationalTransaction::query()->latest('id')->firstOrFail();
+    expect($payment->type)->toBe(OperationalTransactionType::CashPayment)->and($payment->payable_obligation_id)->toBe($obligation->id)
+        ->and($payment->vendor_id)->toBeNull()->and($payment->contra_account_id)->toBe($this->payableLedger->id);
+    expect(substr_count($this->get(route('payments.index'))->getContent(), 'data-payment-row="'.$payment->id.'"'))->toBe(1);
+
+    // The payment detail names its payable and links the original accrued expense; an unlinked payment has no such row.
+    $this->get(route('transactions.show', $payment))->assertOk()->assertSee('Linked payable')->assertSee('Payable #'.$obligation->id)
+        ->assertSee('href="'.route('transactions.show', $expense).'"', false)->assertSee('#'.$expense->id.' · '.$expense->reference_number);
+    $this->get(route('transactions.show', $expense))->assertOk()->assertDontSee('data-linked-payable', false);
 });

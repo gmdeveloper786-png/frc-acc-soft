@@ -147,6 +147,22 @@ class StaffAdvanceRecoveryService
      *
      * @return Collection<int, object{line_id: int, amount: string, period_start: string}>
      */
+    /**
+     * Whether any payroll run that is still alive (draft to paid) deducts this
+     * component from the employee. Such a deduction may be recovering an
+     * advance, so the advance's payout must not be undone underneath it.
+     */
+    public function hasRecoveryDeductions(int $employeeId, int $componentId): bool
+    {
+        return DB::table('payroll_run_line_items')
+            ->join('payroll_run_lines', 'payroll_run_lines.id', '=', 'payroll_run_line_items.payroll_run_line_id')
+            ->join('payroll_runs', 'payroll_runs.id', '=', 'payroll_run_lines.payroll_run_id')
+            ->where('payroll_run_lines.employee_id', $employeeId)->where('payroll_run_line_items.payroll_component_id', $componentId)
+            ->where('payroll_run_line_items.amount', '>', 0)
+            ->whereNotIn('payroll_runs.status', [PayrollRunStatus::Rejected->value, PayrollRunStatus::Reversed->value])
+            ->exists();
+    }
+
     private function postedDeductions(int $employeeId, int $componentId): Collection
     {
         return DB::table('payroll_run_line_items')

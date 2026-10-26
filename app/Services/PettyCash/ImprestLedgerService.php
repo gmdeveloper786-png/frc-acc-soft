@@ -5,6 +5,7 @@ namespace App\Services\PettyCash;
 use App\Enums\JournalStatus;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
+use App\Models\FinancialAccount;
 use App\Models\ImprestFloat;
 use App\Models\ImprestReplenishment;
 use App\Models\JournalLine;
@@ -82,6 +83,31 @@ class ImprestLedgerService
             ->where('posted_at', '>=', $float->created_at)
             ->whereNotIn('id', $this->coveredVoucherIds($float))
             ->orderBy('transaction_date')->orderBy('id')->get();
+    }
+
+    /** Voucher statuses that hold part of the float until posted: in approval, approved or paid out. */
+    public const RESERVING_STATUSES = [OperationalTransactionStatus::Submitted->value, OperationalTransactionStatus::Approved->value, OperationalTransactionStatus::Disbursed->value];
+
+    /** The active float whose petty cash ledger and branch this cash account holds, if any. */
+    public function activeFloatFor(FinancialAccount $account, bool $lock = false): ?ImprestFloat
+    {
+        return ImprestFloat::query()->where('is_active', true)->where('branch_id', $account->branch_id)->where('account_id', $account->account_id)
+            ->when($lock, fn (Builder $query) => $query->lockForUpdate())->first();
+    }
+
+    /**
+     * Petty cash that can still be paid out: the posted ledger balance less the
+     * vouchers in approval, approved or disbursed but not yet posted. Drafts and
+     * returned vouchers reserve nothing (they are checked again when submitted);
+     * posted ones are already in the balance. $exceptId leaves a voucher's own
+     * reservation out when it is checked again.
+     */
+    public function available(ImprestFloat $float, ?int $exceptId = null): BigDecimal
+    {
+        $reserved = $this->vouchers($float)->whereIn('status', self::RESERVING_STATUSES)->when($exceptId, fn (Builder $query) => $query->whereKeyNot($exceptId))
+            ->pluck('amount')->reduce(fn (BigDecimal $sum, $amount): BigDecimal => $sum->plus(AccountingDecimal::of((string) $amount)), BigDecimal::zero()->toScale(4));
+
+        return $this->balance($float)->minus($reserved);
     }
 
     /** @return Collection<int, OperationalTransaction> Vouchers not yet posted (draft, in approval, disbursed or returned). */

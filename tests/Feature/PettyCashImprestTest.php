@@ -44,7 +44,7 @@ beforeEach(function () {
     $this->otherBranch = Branch::factory()->create(['status' => 'publish']);
     $this->pettyLedger = Account::factory()->create(['code' => '111150']);
     $this->bankLedger = Account::factory()->create(['code' => '111201']);
-    $this->expenseLedger = Account::factory()->create(['code' => '511150', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->expenseLedger = Account::factory()->create(['code' => '511150', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'direct_payment_eligible' => true]);
     $this->pettyCash = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Petty cash box', 'branch_id' => $this->branch, 'account_id' => $this->pettyLedger]);
     $this->bank = FinancialAccount::factory()->create(['type' => 'bank', 'name' => 'Main bank', 'branch_id' => $this->branch, 'account_id' => $this->bankLedger]);
     $this->actingAs($this->maker);

@@ -48,6 +48,12 @@ class FinancialAccountActivationGuard
                 $validator->errors()->add('account_id', 'This branch already has a financial account linked to the GL ledger.');
             }
 
+            $sharedConflict = FinancialAccount::query()->whereKeyNot($financialAccount->id)->where('account_id', $financialAccount->account_id)
+                ->when(! $financialAccount->isShared(), fn ($query) => $query->where('scope', FinancialAccount::SCOPE_ORGANIZATION))->exists();
+            if ($sharedConflict || ($financialAccount->isShared() && $type !== 'bank')) {
+                $validator->errors()->add('account_id', 'A shared bank account needs a bank ledger of its own.');
+            }
+
             $incompatibleType = FinancialAccount::query()->whereKeyNot($financialAccount->id)
                 ->where('account_id', $financialAccount->account_id)->where('type', '!=', $type)->exists();
             if ($incompatibleType) {

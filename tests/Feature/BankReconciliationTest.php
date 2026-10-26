@@ -19,14 +19,17 @@ use App\Models\JournalLine;
 use App\Models\User;
 use App\Models\VoucherType;
 use App\Services\BankReconciliation\ReconciliationCalculator;
+use App\Services\BankReconciliation\ReconciliationService;
 use App\Services\JournalPostingService;
 use App\Services\JournalReversalService;
 use Database\Seeders\AppSettingSeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\VoucherTypeSeeder;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -482,4 +485,99 @@ test('opening entries clear as brought forward and a cancelled cheque with its r
     expect(bankRecFigures($reconciliation))->toMatchArray(['uncleared_total' => '0.00', 'unrecorded_total' => '0.00', 'difference' => '0.00'])
         ->and($line->refresh()->status)->toBe('ignored')
         ->and(BankReconciliationMatch::query()->sole()->match_type)->toBe('brought_forward');
+});
+
+test('a draft can be cancelled with a reason, releasing its matches, clearances and ignored lines for a new reconciliation', function () {
+    $opening = bankRecJournal($this, $this->bankA, '2026-01-01', '5000.00');
+    $deposit = bankRecJournal($this, $this->bankA, '2026-01-15', '100.00');
+    $statement = bankRecStatement($this->bankA, ['period_from' => '2026-01-02', 'opening_balance' => '5000.0000', 'closing_balance' => '5100.0000']);
+    $line = bankRecLine($statement, '2026-01-15', '100.00');
+    $noise = bankRecLine($statement, '2026-01-20', '-15.00');
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '5100.00');
+    $this->actingAs($this->preparer);
+    $this->post(route('bank-reconciliations.matches.store', $reconciliation), ['statement_line_id' => $line->id, 'journal_line_id' => $deposit->id])->assertSessionHasNoErrors();
+    $this->post(route('bank-reconciliations.brought-forward', $reconciliation), ['journal_line_id' => $opening->id, 'note' => 'Opening balance'])->assertSessionHasNoErrors();
+    $this->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $noise]))->assertSessionHasNoErrors();
+    $journalLines = JournalLine::query()->count();
+    $this->get(route('bank-reconciliations.show', $reconciliation))->assertSee('Cancel draft');
+
+    // Without the prepare permission or the branch, or without a reason, nothing changes.
+    $this->actingAs($this->approver)->post(route('bank-reconciliations.cancel', $reconciliation), ['cancellation_reason' => 'Approver should not cancel'])->assertForbidden();
+    $this->actingAs(bankRecUser(SystemRole::Accountant, $this->branchB))->post(route('bank-reconciliations.cancel', $reconciliation), ['cancellation_reason' => 'Other branch should not cancel'])->assertForbidden();
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.cancel', $reconciliation), ['cancellation_reason' => 'short'])->assertSessionHasErrors('cancellation_reason');
+    expect($reconciliation->fresh()->isDraft())->toBeTrue()->and($reconciliation->matches()->count())->toBe(2);
+
+    $this->post(route('bank-reconciliations.cancel', $reconciliation), ['cancellation_reason' => 'Wrong statement date entered'])->assertSessionHasNoErrors()->assertRedirect(route('bank-reconciliations.index'));
+
+    $fresh = $reconciliation->fresh();
+    $audit = AuditLog::query()->where('event', 'bank_reconciliation.cancelled')->where('auditable_id', $reconciliation->id)->firstOrFail();
+    expect($fresh->status)->toBe(BankReconciliation::CANCELLED)->and($fresh->open_key)->toBeNull()
+        ->and($fresh->matches()->count())->toBe(0)
+        ->and($line->fresh()->status)->toBe(BankStatementLine::UNMATCHED)
+        ->and($noise->fresh()->status)->toBe(BankStatementLine::UNMATCHED)->and($noise->fresh()->ignored_in_reconciliation_id)->toBeNull()
+        ->and($statement->fresh()->status)->toBe($statement->status)->and(JournalLine::query()->count())->toBe($journalLines)
+        ->and($audit->actor_id)->toBe($this->preparer->id)->and($audit->properties['reason'])->toBe('Wrong statement date entered')
+        ->and(collect($audit->properties['released_matches'])->pluck('journal_line_id')->sort()->values()->all())->toBe(collect([$opening->id, $deposit->id])->sort()->values()->all())
+        ->and($audit->properties['restored_ignored_line_ids'])->toBe([$noise->id]);
+
+    // The cancelled draft stays on record, cannot be cancelled again, and no longer blocks a new reconciliation.
+    $this->get(route('bank-reconciliations.show', $reconciliation))->assertOk()->assertSee('Wrong statement date entered')->assertDontSee('Cancel draft')
+        ->assertSee('This reconciliation was cancelled and cannot be submitted.')->assertDontSee('before the reconciliation can be submitted');
+    $this->get(route('bank-reconciliations.index'))->assertOk()->assertSee('<option value="cancelled"', false);
+    $this->post(route('bank-reconciliations.cancel', $reconciliation), ['cancellation_reason' => 'Cancelling a second time'])->assertSessionHasErrors('status');
+    $next = bankRecStart($this, $this->bankA, '2026-01-31', '5100.00');
+    expect($next->id)->not->toBe($reconciliation->id)
+        ->and(app(ReconciliationCalculator::class)->outstandingBookLines($next)->pluck('id'))->toContain($deposit->id)->toContain($opening->id);
+});
+
+test('submitted and approved reconciliations cannot be cancelled', function () {
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '0.00');
+    foreach ([BankReconciliation::SUBMITTED, BankReconciliation::APPROVED] as $status) {
+        $reconciliation->update(['status' => $status, 'open_key' => $status === BankReconciliation::SUBMITTED ? '1' : null]);
+        $this->actingAs($this->preparer)->post(route('bank-reconciliations.cancel', $reconciliation), ['cancellation_reason' => 'Should not be allowed'])->assertSessionHasErrors('status');
+        expect($reconciliation->fresh()->status)->toBe($status);
+    }
+});
+
+test('a journal whose bank line is matched in a reconciliation cannot be reversed until the match is released, and never once approved', function () {
+    $service = app(ReconciliationService::class);
+    $reversals = app(JournalReversalService::class);
+    $reverse = fn (JournalLine $line) => $reversals->reverse($line->journalEntry->fresh(), $this->january, '2026-01-25', 'Cheque cancelled', $this->admin);
+    $statement = bankRecStatement($this->bankA, ['period_from' => '2026-01-01', 'opening_balance' => '0.0000', 'closing_balance' => '-1500.0000']);
+    $matched = bankRecJournal($this, $this->bankA, '2026-01-10', '-900.00');
+    $other = bankRecJournal($this, $this->bankA, '2026-01-11', '-600.00');
+    $free = bankRecJournal($this, $this->bankA, '2026-01-12', '-50.00');
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '-1500.00');
+    $match = $service->match($reconciliation, bankRecLine($statement, '2026-01-10', '-900.00')->id, $matched->id, $this->preparer);
+
+    // Matched in a draft reconciliation: refused, with nothing written and the match untouched.
+    $journals = JournalEntry::query()->count();
+    expect(fn () => $reverse($matched))->toThrow(ValidationException::class, 'Unmatch it there before reversing')
+        ->and(JournalEntry::query()->count())->toBe($journals)->and($matched->journalEntry->fresh()->status->value)->toBe('posted')
+        ->and(BankReconciliationMatch::query()->whereKey($match->id)->exists())->toBeTrue()
+        ->and($reversals->requestBlockedReason($matched->journalEntry->fresh()))->not->toBeNull();
+
+    // A line nobody matched reverses normally; once unmatched through the reconciliation, so does the matched one.
+    expect($reverse($free)->status->value)->toBe('posted');
+    $service->unmatch($reconciliation, $match, $this->preparer);
+    expect($reverse($matched)->status->value)->toBe('posted');
+
+    // Submitted and approved reconciliations block too; an approved one is locked for good.
+    $service->match($reconciliation, bankRecLine($statement, '2026-01-11', '-600.00')->id, $other->id, $this->preparer);
+    foreach ([BankReconciliation::SUBMITTED => 'awaiting approval', BankReconciliation::APPROVED => 'which is locked'] as $status => $message) {
+        DB::table('bank_reconciliations')->where('id', $reconciliation->id)->update(['status' => $status]);
+        expect(fn () => $reverse($other))->toThrow(ValidationException::class, $message);
+    }
+    expect($other->journalEntry->fresh()->status->value)->toBe('posted')->and(BankReconciliationMatch::query()->where('journal_line_id', $other->id)->exists())->toBeTrue();
+});
+
+test('cancelling a draft reconciliation releases its matches, so their journals can be reversed again', function () {
+    $service = app(ReconciliationService::class);
+    $statement = bankRecStatement($this->bankA, ['period_from' => '2026-01-01', 'opening_balance' => '0.0000', 'closing_balance' => '-900.0000']);
+    $line = bankRecJournal($this, $this->bankA, '2026-01-10', '-900.00');
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '-900.00');
+    $service->match($reconciliation, bankRecLine($statement, '2026-01-10', '-900.00')->id, $line->id, $this->preparer);
+    $service->cancel($reconciliation->fresh(), 'Started on the wrong statement', $this->preparer);
+
+    expect(app(JournalReversalService::class)->reverse($line->journalEntry->fresh(), $this->january, '2026-01-25', 'Cheque cancelled', $this->admin)->status->value)->toBe('posted');
 });

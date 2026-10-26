@@ -43,7 +43,7 @@ beforeEach(function () {
     $this->cashLedger = Account::factory()->create(['code' => '11102', 'name' => 'Cash in Hand - Rehab Centre', 'financial_account_type' => 'cash']);
     $this->bankLedger = Account::factory()->create(['code' => '11201', 'name' => 'Bank - Main Operating Account', 'financial_account_type' => 'bank']);
     $this->income = Account::factory()->create(['code' => '42102', 'name' => 'Therapy Session Fees', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
-    $this->expense = Account::factory()->create(['code' => '53101', 'name' => 'Rent', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    $this->expense = Account::factory()->create(['code' => '53101', 'name' => 'Rent', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'direct_payment_eligible' => true]);
     $this->cashA = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Cash - Shahrah-e-Faisal', 'branch_id' => $this->branchA, 'account_id' => $this->cashLedger]);
     $this->cashB = FinancialAccount::factory()->create(['type' => 'cash', 'name' => 'Cash - Malir Town', 'branch_id' => $this->branchB, 'account_id' => $this->cashLedger]);
     $this->bankA = FinancialAccount::factory()->create(['type' => 'bank', 'name' => 'Bank - Shahrah-e-Faisal', 'branch_id' => $this->branchA, 'account_id' => $this->bankLedger]);

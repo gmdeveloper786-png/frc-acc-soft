@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers\AccountingSetup;
 
+use App\Enums\AccountLevel;
+use App\Enums\AccountType;
+use App\Enums\NormalBalance;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreAccountRequest;
 use App\Http\Requests\UpdateAccountRequest;
@@ -30,11 +33,21 @@ class AccountController extends Controller
     /**
      * Show the form for creating a new resource.
      */
-    public function create(): View
+    public function create(Request $request, AccountService $service): View
     {
-        $parents = Account::query()->where('is_postable', false)->where('is_active', true)->orderBy('code')->get();
+        $classes = Account::query()->where('level', AccountLevel::ClassLevel->value)->orderBy('code')->get();
+        // Active classes, groups and sub groups can take children; each carries its non-binding next-code preview.
+        $parents = Account::query()->where('level', '!=', AccountLevel::Ledger->value)->where('is_active', true)->orderBy('code')->get()
+            ->each(function (Account $parent) use ($service): void {
+                $parent->setAttribute('next_code_preview', $service->previewNextCode($parent));
+                // Under a sub group whose ledgers are all contra (e.g. accumulated depreciation), suggest contra.
+                $ledgers = $parent->level === AccountLevel::SubGroup ? $parent->children()->get(['normal_balance', 'account_type']) : collect();
+                $parent->setAttribute('contra_children', $ledgers->isNotEmpty() && $ledgers->every(fn (Account $ledger): bool => $ledger->normal_balance !== (in_array($ledger->account_type, [AccountType::Asset, AccountType::Expense], true) ? NormalBalance::Debit : NormalBalance::Credit)));
+            });
+        // "Add child account" opens the form on a chosen parent.
+        $selectedParent = $parents->firstWhere('id', $request->integer('parent'));
 
-        return view('accounting-setup.accounts.create', compact('parents'));
+        return view('accounting-setup.accounts.create', compact('classes', 'parents', 'selectedParent'));
     }
 
     /**
@@ -42,7 +55,7 @@ class AccountController extends Controller
      */
     public function store(StoreAccountRequest $request, AccountService $service): RedirectResponse
     {
-        $account = $service->create($request->validated(), $request->user());
+        $account = $service->createChild($request->validated(), $request->user());
 
         return redirect()->route('accounts.show', $account)->with('status', 'Account created.');
     }
@@ -62,9 +75,9 @@ class AccountController extends Controller
      */
     public function edit(Account $account): View
     {
-        $parents = Account::query()->where('is_postable', false)->where('is_active', true)->whereKeyNot($account->id)->orderBy('code')->get();
+        $account->load('parent');
 
-        return view('accounting-setup.accounts.edit', compact('account', 'parents'));
+        return view('accounting-setup.accounts.edit', compact('account'));
     }
 
     /**
@@ -72,6 +85,8 @@ class AccountController extends Controller
      */
     public function update(UpdateAccountRequest $request, Account $account, AccountService $service): RedirectResponse
     {
+        // Switching an account off through Edit needs the same permission as the Deactivate action.
+        abort_if($account->is_active && ! $request->boolean('is_active') && ! $request->user()->can('accounts.deactivate'), 403);
         $service->update($account, $request->validated());
 
         return redirect()->route('accounts.show', $account)->with('status', 'Account updated.');

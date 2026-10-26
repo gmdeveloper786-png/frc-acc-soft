@@ -37,7 +37,7 @@ class AccountMappingController extends Controller
             'controls' => $controls,
             'services' => $services,
             'incomeAccounts' => $mappings->eligibleAccounts(AccountType::Income),
-            'financialAccounts' => FinancialAccount::query()->with(['account', 'branch'])->whereIn('branch_id', $access->scope($request->user())->select('id'))->orderBy('type')->orderBy('name')->get(),
+            'financialAccounts' => FinancialAccount::query()->with(['account', 'branch'])->usableIn($access->scope($request->user())->select('id'))->orderBy('type')->orderBy('name')->get(),
             'donationCategories' => DonationCategory::query()->with('incomeAccount')->orderBy('name')->get(),
             'mappings' => $mappings,
         ]);

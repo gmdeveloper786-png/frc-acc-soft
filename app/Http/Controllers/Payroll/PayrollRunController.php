@@ -76,7 +76,7 @@ class PayrollRunController extends Controller
             ...$this->detail($run, $sensitive, $service),
             'canApprove' => $service->canApprove($run, $user),
             'isMaker' => in_array($user->id, [$run->created_by, $run->validated_by, $run->submitted_by], true),
-            'financialAccounts' => $user->can('payroll.pay') ? FinancialAccount::query()->where('branch_id', $run->branch_id)->where('is_active', true)->whereIn('type', ['bank', 'cash'])->orderBy('name')->get() : collect(),
+            'financialAccounts' => $user->can('payroll.pay') ? FinancialAccount::query()->usableIn((int) $run->branch_id)->where('is_active', true)->whereIn('type', ['bank', 'cash'])->orderBy('name')->get() : collect(),
             // Staff advance instalments due by this period, for the preparer to put on the draft lines.
             'dueRecoveries' => $sensitive && in_array($run->status, [PayrollRunStatus::Draft, PayrollRunStatus::Rejected, PayrollRunStatus::Validated], true) ? $advanceRecovery->dueForRun($run) : collect(),
             'payslipsAvailable' => $sensitive && $payslips->isIssuable($run),

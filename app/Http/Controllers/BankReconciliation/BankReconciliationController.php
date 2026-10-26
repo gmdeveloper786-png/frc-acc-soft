@@ -5,6 +5,7 @@ namespace App\Http\Controllers\BankReconciliation;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\BankReconciliation\RejectBankReconciliationRequest;
 use App\Http\Requests\BankReconciliation\StoreBankReconciliationRequest;
+use App\Models\AuditLog;
 use App\Models\BankReconciliation;
 use App\Models\BankStatement;
 use App\Models\FinancialAccount;
@@ -59,6 +60,10 @@ class BankReconciliationController extends Controller
         $figures = $calculator->calculate($bankReconciliation);
         $editable = $bankReconciliation->isDraft() && $request->user()->can('bank_reconciliation.prepare');
         $requireReference = $request->boolean('same_reference');
+        $cancellation = $bankReconciliation->isCancelled()
+            ? AuditLog::query()->where('auditable_type', $bankReconciliation->getMorphClass())->where('auditable_id', $bankReconciliation->id)
+                ->where('event', 'bank_reconciliation.cancelled')->with('actor')->latest('id')->first()
+            : null;
 
         return view('bank-reconciliation.show', [
             'reconciliation' => $bankReconciliation,
@@ -70,7 +75,16 @@ class BankReconciliationController extends Controller
             'firstStatementDate' => BankStatement::query()->where('financial_account_id', $bankReconciliation->financial_account_id)->where('status', BankStatement::IMPORTED)->min('period_from'),
             'isMaker' => in_array($request->user()->id, $service->makerIds($bankReconciliation), true),
             'formula' => ReconciliationReport::FORMULA,
+            'cancellation' => $cancellation,
         ]);
+    }
+
+    public function cancel(Request $request, BankReconciliation $bankReconciliation, ReconciliationService $service): RedirectResponse
+    {
+        $data = $request->validate(['cancellation_reason' => ['required', 'string', 'min:10', 'max:2000']]);
+        $service->cancel($bankReconciliation, trim($data['cancellation_reason']), $request->user());
+
+        return redirect()->route('bank-reconciliations.index')->with('status', 'Draft reconciliation cancelled. Its matches were released and a new reconciliation can be started.');
     }
 
     public function statement(Request $request, BankReconciliation $bankReconciliation, ReconciliationService $service, ReconciliationCalculator $calculator): View
@@ -118,6 +132,6 @@ class BankReconciliationController extends Controller
     /** @return Collection<int, FinancialAccount> */
     private function bankAccounts(Request $request, BranchAccess $access): Collection
     {
-        return FinancialAccount::query()->with('branch')->where('type', 'bank')->whereIn('branch_id', $access->scope($request->user())->select('id'))->orderBy('name')->get();
+        return FinancialAccount::query()->with('branch')->where('type', 'bank')->bookVisibleTo($request->user(), $access->scope($request->user())->select('id'))->orderBy('name')->get();
     }
 }

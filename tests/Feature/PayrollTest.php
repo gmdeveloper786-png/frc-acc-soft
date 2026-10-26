@@ -20,12 +20,15 @@ use App\Models\FiscalYear;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\OperationalTransaction;
+use App\Models\PayeeType;
+use App\Models\PaymentPurpose;
 use App\Models\PayrollComponent;
 use App\Models\PayrollRun;
 use App\Models\PayrollRunHistory;
 use App\Models\PayrollRunPayment;
 use App\Models\User;
 use App\Services\OperationalTransactionService;
+use App\Services\Payments\UnifiedPaymentService;
 use App\Services\Payroll\EmployeeService;
 use App\Services\Payroll\PayrollComponentService;
 use App\Services\Payroll\PayrollRunService;
@@ -726,4 +729,19 @@ test('a user who edited payroll lines cannot approve the run another user submit
     expect($service->canApprove($run->fresh(), $editor))->toBeFalse()
         ->and(fn () => $service->approve($run->fresh(), $editor))->toThrow(ValidationException::class, 'You edited this payroll run')
         ->and($service->approve($run->fresh(), $this->approver)->status)->toBe(PayrollRunStatus::Approved);
+});
+
+test('the unified payment screen pays salary through the payroll workflow, its salary payable debit and its cap', function () {
+    payrollEmployee($this);
+    $run = payrollPosted($this);
+    $payments = app(UnifiedPaymentService::class);
+    $data = ['payment_purpose_id' => PaymentPurpose::query()->where('code', 'salary_payable')->value('id'),
+        'payroll_run_id' => $run->id, 'branch_id' => $run->branch_id, 'transaction_date' => '2026-01-31', 'financial_account_id' => $this->bank->id];
+
+    $payment = $payments->create([...$data, 'amount' => (string) $run->net_amount], $this->maker);
+    expect($payment->contra_account_id)->toBe($this->salaryPayable->id)->and($payment->payee_snapshot['purpose']['code'])->toBe('salary_payable')
+        ->and(PayrollRunPayment::query()->where('payroll_run_id', $run->id)->where('operational_transaction_id', $payment->id)->exists())->toBeTrue()
+        ->and(fn () => $payments->create([...$data, 'amount' => '0.01'], $this->maker))->toThrow(ValidationException::class, 'unpaid net salary')
+        ->and(fn () => $payments->create([...$data, 'amount' => '1.00', 'payee_type_id' => PayeeType::query()->where('code', 'vendor')->value('id')], $this->maker))->toThrow(ValidationException::class, 'cannot be used')
+        ->and(fn () => $payments->create([...$data, 'amount' => '1.00'], $this->approver))->toThrow(HttpException::class);
 });

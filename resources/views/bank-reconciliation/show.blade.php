@@ -9,7 +9,7 @@
     $candidatesByAmount = $bookCandidates->groupBy(fn ($line) => \App\Services\AccountingDecimal::string($bookAmount($line)));
 @endphp
 @section('title','Bank Reconciliation — '.$account->name) @section('eyebrow','Bank reconciliation') @section('page-title',$account->name.' — '.$reconciliation->statement_date->format('d M Y'))
-@section('page-description',$account->branch->name.' • '.($account->bank_name ?? 'Bank').($account->maskedNumber() ? ' • '.$account->maskedNumber() : '').' • '.$reconciliation->statusLabel())
+@section('page-description',($account->isShared() ? 'All Branches — Shared (custodian: '.$account->branch->name.')' : $account->branch->name).' • '.($account->bank_name ?? 'Bank').($account->maskedNumber() ? ' • '.$account->maskedNumber() : '').' • '.$reconciliation->statusLabel())
 @section('page-actions')
 <div class="d-flex gap-2 flex-wrap">
     <a class="btn btn-outline-primary" href="{{ route('bank-reconciliations.statement', $reconciliation) }}">Reconciliation statement</a>
@@ -37,7 +37,9 @@
         <tr><th>Balance as per bank book</th><th class="text-end font-monospace">{{ $amount($figures['book_balance']) }}</th></tr>
         <tr><th>Difference</th><th class="text-end font-monospace"><span class="status-badge {{ $reconciled ? 'success' : 'danger' }}">{{ $amount($figures['difference']) }}</span></th></tr>
     </tbody></table></div>
-    @if(! $reconciled)
+    @if($reconciliation->isCancelled())
+        <div class="alert alert-secondary mb-0">This reconciliation was cancelled and cannot be submitted. Its matches and brought-forward clearances were released, so the figures above are recalculated for the cancelled record without them; any difference shown is not an outstanding reconciliation difference.</div>
+    @elseif(! $reconciled)
         <div class="alert alert-warning mb-0">The difference must be exactly 0.00 before the reconciliation can be submitted.
             @if($figures['unrecorded']->isNotEmpty()) Statement items not in the books total {{ $amount($figures['unrecorded_total']) }}: record them through the normal receipt or payment workflow, then match them here. Nothing is posted automatically.@endif
         </div>
@@ -48,11 +50,23 @@
         <div class="col-md-3"><small>Submitted by</small><strong class="d-block">{{ $reconciliation->submitter?->name ?? '—' }}</strong><span class="table-subtext">{{ $reconciliation->submitted_at?->format('d M Y H:i') }}</span></div>
         <div class="col-md-3"><small>Approved by</small><strong class="d-block">{{ $reconciliation->approver?->name ?? '—' }}</strong><span class="table-subtext">{{ $reconciliation->approved_at?->format('d M Y H:i') }}</span></div>
         <div class="col-md-3"><small>Statement</small><strong class="d-block">@if($reconciliation->statement)<a href="{{ route('bank-statements.show', $reconciliation->statement) }}">{{ $reconciliation->statement->period_from->format('d M Y') }} – {{ $reconciliation->statement->period_to->format('d M Y') }}</a>@else Entered manually @endif</strong></div>
+        @if($cancellation)<div class="col-12"><div class="alert alert-danger mb-0"><strong>Cancelled</strong> by {{ $cancellation->actor?->name ?? 'Unknown' }} on {{ $cancellation->created_at->format('d M Y H:i') }}: {{ $cancellation->properties['reason'] ?? '' }}<span class="d-block small">{{ count($cancellation->properties['released_matches'] ?? []) }} match(es) released. Kept for the record only; start a new reconciliation for this account.</span></div></div>@endif
         @if($reconciliation->rejection_reason && $reconciliation->isDraft())<div class="col-12"><div class="alert alert-warning mb-0"><strong>Returned for correction:</strong> {{ $reconciliation->rejection_reason }}</div></div>@endif
     </div>
     <div class="form-actions">
         @if($editable)
             <form method="POST" action="{{ route('bank-reconciliations.submit', $reconciliation) }}" data-submit-once>@csrf<button class="btn btn-primary" @disabled(! $reconciled)>Submit for approval</button></form>
+            <details class="mt-2">
+                <summary class="btn btn-outline-danger btn-sm">Cancel draft</summary>
+                <form method="POST" action="{{ route('bank-reconciliations.cancel', $reconciliation) }}" class="mt-2" data-submit-once>
+                    @csrf
+                    <label class="form-label" for="cancellation_reason">Reason for cancelling this draft</label>
+                    <textarea class="form-control @error('cancellation_reason') is-invalid @enderror" id="cancellation_reason" name="cancellation_reason" rows="2" minlength="10" maxlength="2000" required>{{ old('cancellation_reason') }}</textarea>
+                    @error('cancellation_reason')<div class="invalid-feedback">{{ $message }}</div>@enderror
+                    <small class="form-text d-block mb-2">Its matches and brought-forward clearances are released. Statements and journals are not changed. This cannot be undone.</small>
+                    <button class="btn btn-danger btn-sm" data-confirm="Cancel this draft reconciliation? Its matches will be released.">Confirm cancellation</button>
+                </form>
+            </details>
         @endif
         @if($reconciliation->status === \App\Models\BankReconciliation::SUBMITTED && $user->can('bank_reconciliation.approve'))
             @if($isMaker)

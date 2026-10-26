@@ -69,6 +69,21 @@ class PurchaseBill extends Model
         return $this->payments()->where('status', OperationalTransactionStatus::Posted->value);
     }
 
+    /** Payments that hold part of the bill: posted ones and those still in approval (not rejected or reversed). */
+    public function reservingPayments(): HasMany
+    {
+        return $this->payments()->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value]);
+    }
+
+    /** What a new payment may still settle: the total less every reserving payment, as the vendor payment workflow enforces. */
+    public function availableToPayAmount(): string
+    {
+        $reserved = $this->reservingPayments()->get(['amount'])
+            ->reduce(fn (BigDecimal $sum, OperationalTransaction $payment): BigDecimal => $sum->plus(AccountingDecimal::of($payment->amount)), BigDecimal::zero()->toScale(4));
+
+        return AccountingDecimal::string(AccountingDecimal::of($this->total_amount)->minus($reserved));
+    }
+
     public function purchaseOrder(): BelongsTo
     {
         return $this->belongsTo(PurchaseOrder::class);

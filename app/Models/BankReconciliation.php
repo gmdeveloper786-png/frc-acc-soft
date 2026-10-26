@@ -21,7 +21,10 @@ class BankReconciliation extends Model
 
     public const APPROVED = 'approved';
 
-    public const STATUSES = [self::DRAFT, self::SUBMITTED, self::APPROVED];
+    /** An abandoned draft: its matches were released and the account is free for a new reconciliation. */
+    public const CANCELLED = 'cancelled';
+
+    public const STATUSES = [self::DRAFT, self::SUBMITTED, self::APPROVED, self::CANCELLED];
 
     protected function casts(): array
     {
@@ -40,6 +43,11 @@ class BankReconciliation extends Model
         return $this->status === self::DRAFT;
     }
 
+    public function isCancelled(): bool
+    {
+        return $this->status === self::CANCELLED;
+    }
+
     public function isApproved(): bool
     {
         return $this->status === self::APPROVED;
@@ -55,6 +63,7 @@ class BankReconciliation extends Model
         return match ($this->status) {
             self::APPROVED => 'success',
             self::SUBMITTED => 'pending',
+            self::CANCELLED => 'danger',
             default => 'neutral',
         };
     }

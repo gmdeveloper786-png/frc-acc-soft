@@ -31,7 +31,7 @@ beforeEach(function () {
     $year = FiscalYear::factory()->create(['start_date' => '2026-01-01', 'end_date' => '2026-12-31', 'status' => FiscalYearStatus::Open, 'is_current' => true]);
     AccountingPeriod::factory()->create(['fiscal_year_id' => $year, 'start_date' => '2026-01-01', 'end_date' => '2026-01-31', 'status' => AccountingPeriodStatus::Open]);
     $this->branch = Branch::factory()->create(['status' => 'publish']);
-    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
+    $this->expense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true, 'direct_payment_eligible' => true]);
     $this->income = Account::factory()->create(['account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
     $this->payable = Account::factory()->create(['account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => Account::factory()->create()]);
@@ -127,7 +127,7 @@ test('a vendor payment is postable only after approval and disbursement', functi
 });
 
 test('a petty cash voucher is postable only after approval and disbursement', function () {
-    expectPostOnlyWhenDisbursed($this, postButtonDraft($this, OperationalTransactionType::PettyCash));
+    expectPostOnlyWhenDisbursed($this, postButtonDraft($this, OperationalTransactionType::PettyCash, ['financial_account_id' => fundedPettyCashAccount($this->branch->id)->id]));
 });
 
 test('a paid expense is postable only after approval and disbursement', function () {
@@ -195,4 +195,21 @@ test('the post button needs the post permission and access to the branch', funct
     $this->actingAs($approver)->post(route('transactions.post', $payment))->assertForbidden();
     $this->actingAs($outsider)->post(route('transactions.post', $payment))->assertForbidden();
     expect($payment->fresh()->status)->toBe(OperationalTransactionStatus::Disbursed);
+});
+
+test('a submitted petty cash voucher tells its maker it awaits an approver, while an authorized approver sees approve and return', function () {
+    $voucher = postButtonDraft($this, OperationalTransactionType::PettyCash, ['financial_account_id' => fundedPettyCashAccount($this->branch->id)->id]);
+    $this->service->submit($voucher, $this->maker);
+    $approver = User::factory()->create();
+    $approver->assignRole(SystemRole::Approver->value);
+    $approver->branches()->attach($this->branch);
+
+    $this->actingAs($this->maker)->get(route('transactions.show', $voucher))->assertOk()
+        ->assertSee('Submitted for approval. Awaiting action by an authorized approver.')->assertDontSee('Approve this transaction?')->assertDontSee('Return for correction');
+    $this->actingAs($approver)->get(route('transactions.show', $voucher))->assertOk()
+        ->assertSee('Approve this transaction?')->assertSee('Return for correction')->assertDontSee('data-workflow-next-step', false);
+
+    $this->service->approve($voucher->fresh(), $approver);
+    $this->actingAs($approver)->get(route('transactions.show', $voucher))->assertOk()->assertSee('Approved. Awaiting disbursement or posting by an authorized user.');
+    expect($voucher->fresh()->status)->toBe(OperationalTransactionStatus::Approved);
 });

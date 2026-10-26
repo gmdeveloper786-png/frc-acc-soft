@@ -38,7 +38,8 @@ class OpeningBalanceValidationService
             && $account->is_active
             && $account->is_postable
             && $account->financial_statement === FinancialStatement::BalanceSheet
-            && in_array($account->account_type, self::ELIGIBLE_ACCOUNT_TYPES, true);
+            && in_array($account->account_type, self::ELIGIBLE_ACCOUNT_TYPES, true)
+            && ! $account->hasInactiveAncestor();
     }
 
     public function assertEligibleAccount(?Account $account, string $field): void

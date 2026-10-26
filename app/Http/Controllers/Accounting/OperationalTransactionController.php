@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Accounting;
 
 use App\Enums\OperationalTransactionType;
+use App\Enums\PaymentBehaviour;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreOperationalTransactionRequest;
 use App\Models\Account;
@@ -12,10 +13,13 @@ use App\Models\FinancialAccount;
 use App\Models\FrcService;
 use App\Models\Fund;
 use App\Models\OperationalTransaction;
+use App\Models\PaymentPurpose;
 use App\Models\PurchaseBill;
+use App\Models\StaffAdvance;
 use App\Models\Vendor;
 use App\Services\BranchAccess;
 use App\Services\OperationalTransactionService;
+use App\Services\Payroll\StaffAdvanceService;
 use App\Services\SplitPaymentDetector;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -36,8 +40,11 @@ class OperationalTransactionController extends Controller
             ->when($request->filled('to'), fn ($q) => $q->whereDate('transaction_date', '<=', $request->date('to')))
             ->when($request->filled('search'), fn ($q) => $q->where(fn ($q) => $q->where('party_name', 'like', '%'.$request->string('search').'%')->orWhere('reference_number', 'like', '%'.$request->string('search').'%')->orWhere('narration', 'like', '%'.$request->string('search').'%')))
             ->orderByDesc('transaction_date')->orderByDesc('id')->paginate(20)->withQueryString();
+        $canDirectPay = $type === OperationalTransactionType::Expense
+            && $request->user()->canAny(['payments.create', 'petty_cash.create'])
+            && PaymentPurpose::query()->where('is_active', true)->where('behaviour', PaymentBehaviour::DirectExpense)->exists();
 
-        return view('accounting.transactions.index', compact('transactions', 'type', 'branches'));
+        return view('accounting.transactions.index', compact('transactions', 'type', 'branches', 'canDirectPay'));
     }
 
     public function create(Request $request, BranchAccess $access): View
@@ -49,8 +56,11 @@ class OperationalTransactionController extends Controller
         // but only if it is one of the posted bills this user may pay.
         $billId = (int) $request->old('purchase_bill_id', $request->query('bill'));
         $selectedBill = $type === OperationalTransactionType::VendorPayment ? $data['bills']->firstWhere('id', $billId) : null;
+        $canDirectPay = $type === OperationalTransactionType::Expense
+            && $request->user()->canAny(['payments.create', 'petty_cash.create'])
+            && PaymentPurpose::query()->where('is_active', true)->where('behaviour', PaymentBehaviour::DirectExpense)->exists();
 
-        return view('accounting.transactions.create', [...$data, 'type' => $type, 'selectedBill' => $selectedBill]);
+        return view('accounting.transactions.create', [...$data, 'type' => $type, 'selectedBill' => $selectedBill, 'canDirectPay' => $canDirectPay]);
     }
 
     public function store(StoreOperationalTransactionRequest $request, OperationalTransactionService $service): RedirectResponse
@@ -67,7 +77,7 @@ class OperationalTransactionController extends Controller
     public function show(Request $request, OperationalTransaction $transaction, BranchAccess $access, OperationalTransactionService $service): View
     {
         abort_unless($request->user()->can($transaction->type->permissionPrefix().'.view') && $access->canAccess($request->user(), $transaction->branch), 403);
-        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory', 'purchaseBill', 'payableObligation', 'accruedPayableObligation', 'journalEntry', 'creator', 'approver']);
+        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory', 'purchaseBill.payableAccount', 'payableObligation.sourceExpense', 'accruedPayableObligation', 'journalEntry', 'creator', 'approver']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
         $defaultReversalDate = today()->toDateString();
         $defaultReversalPeriodId = $openPeriods->first(fn (AccountingPeriod $period): bool => $defaultReversalDate >= $period->start_date->toDateString() && $defaultReversalDate <= $period->end_date->toDateString())?->id;
@@ -79,8 +89,12 @@ class OperationalTransactionController extends Controller
         $hasActivePayableSettlements = $service->hasActivePayableSettlementsForSource($transaction);
 
         $splitWarning = app(SplitPaymentDetector::class)->analyze($transaction);
+        // The staff advance a payment was raised for; the advance records this payment as its disbursement when it is posted.
+        $advanceId = StaffAdvanceService::advanceIdFrom($transaction->source_reference);
+        $linkedAdvance = $advanceId ? StaffAdvance::query()->with('branch')->find($advanceId, ['id', 'reference', 'branch_id']) : null;
+        $canOpenAdvance = $linkedAdvance && $request->user()->can('staff_advances.view') && $access->canAccess($request->user(), $linkedAdvance->branch);
 
-        return view('accounting.transactions.show', compact('transaction', 'openPeriods', 'defaultReversalDate', 'defaultReversalPeriodId', 'canApprove', 'canReject', 'canPost', 'splitWarning', 'hasActivePayableSettlements'));
+        return view('accounting.transactions.show', compact('transaction', 'openPeriods', 'defaultReversalDate', 'defaultReversalPeriodId', 'canApprove', 'canReject', 'canPost', 'splitWarning', 'hasActivePayableSettlements', 'linkedAdvance', 'canOpenAdvance'));
     }
 
     public function submit(Request $request, OperationalTransaction $transaction, OperationalTransactionService $service): RedirectResponse
@@ -148,7 +162,7 @@ class OperationalTransactionController extends Controller
 
         return [
             'branches' => $access->scope($request->user())->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
-            'financialAccounts' => FinancialAccount::query()->with('branch')->whereIn('branch_id', $branchIds)->where('is_active', true)->orderBy('name')->get(),
+            'financialAccounts' => FinancialAccount::query()->with('branch')->usableIn($branchIds)->where('is_active', true)->orderBy('name')->get(),
             'ledgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->orderBy('code')->get(),
             'vendors' => Vendor::query()->where('is_active', true)->orderBy('name')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),

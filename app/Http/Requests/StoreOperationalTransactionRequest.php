@@ -18,6 +18,7 @@ class StoreOperationalTransactionRequest extends FormRequest
     public function rules(): array
     {
         $type = OperationalTransactionType::tryFrom((string) $this->input('type'));
+        $isExpense = $type === OperationalTransactionType::Expense;
         $needsFinancial = $type !== OperationalTransactionType::Expense || $this->input('settlement_type') === 'paid';
 
         return [
@@ -26,7 +27,12 @@ class StoreOperationalTransactionRequest extends FormRequest
             'transaction_date' => ['required', 'date'],
             'party_name' => ['nullable', 'string', 'max:255'],
             'amount' => ['required', 'decimal:0,4', 'gt:0'],
-            'financial_account_id' => [$needsFinancial ? 'required' : 'nullable', $type === OperationalTransactionType::Expense ? 'prohibited_if:settlement_type,accrued' : 'nullable', 'integer', 'exists:financial_accounts,id'],
+            'financial_account_id' => [
+                $needsFinancial ? 'required' : 'nullable',
+                $isExpense && $this->input('settlement_type') === 'accrued' ? 'prohibited' : 'nullable',
+                'integer',
+                'exists:financial_accounts,id',
+            ],
             'contra_account_id' => ['nullable', 'integer', 'exists:accounts,id'],
             'payable_account_id' => ['nullable', 'integer', 'exists:accounts,id'],
             'vendor_id' => ['nullable', 'integer', 'exists:vendors,id'],
@@ -38,8 +44,21 @@ class StoreOperationalTransactionRequest extends FormRequest
             'settlement_request_token' => ['nullable', 'uuid'],
             'reference_number' => ['nullable', 'string', 'max:255'],
             'narration' => ['required', 'string', 'max:2000'],
-            'settlement_type' => [$type === OperationalTransactionType::Expense ? 'required' : 'nullable', Rule::in(['paid', 'accrued'])],
+            'settlement_type' => [
+                $isExpense ? 'required' : 'nullable',
+                $isExpense ? Rule::in(['accrued']) : Rule::in(['paid', 'accrued']),
+            ],
             'attachment' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png,webp', 'max:5120'],
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'settlement_type.in' => 'Direct payments must be created from Payments. Expenses is used to record accrued expenses.',
         ];
     }
 }

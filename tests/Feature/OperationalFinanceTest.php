@@ -37,7 +37,7 @@ beforeEach(function () {
     $this->branch = Branch::factory()->create(['status' => 'publish']);
     $this->cashLedger = Account::factory()->create(['code' => '111101']);
     $this->bankLedger = Account::factory()->create(['code' => '111102']);
-    $this->expenseLedger = Account::factory()->create(['code' => '511101', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true]);
+    $this->expenseLedger = Account::factory()->create(['code' => '511101', 'account_type' => 'expense', 'financial_statement' => 'income_expenditure', 'purchase_bill_debit_eligible' => true, 'direct_payment_eligible' => true]);
     $this->incomeLedger = Account::factory()->create(['code' => '411101', 'account_type' => 'income', 'normal_balance' => 'credit', 'financial_statement' => 'income_expenditure']);
     $this->payableLedger = Account::factory()->create(['code' => '211101', 'account_type' => 'liability', 'normal_balance' => 'credit']);
     $this->cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => $this->cashLedger]);
@@ -153,7 +153,7 @@ test('purchase bill posts payable supports partial payment and blocks overpaymen
 });
 
 test('petty cash allows no vendor and cross branch access is rejected', function () {
-    $petty = app(OperationalTransactionService::class)->create(operationalPayload($this, OperationalTransactionType::PettyCash), $this->maker);
+    $petty = app(OperationalTransactionService::class)->create([...operationalPayload($this, OperationalTransactionType::PettyCash), 'financial_account_id' => fundedPettyCashAccount($this->branch->id)->id], $this->maker);
     expect($petty->vendor_id)->toBeNull();
     $restricted = User::factory()->create();
     $restricted->assignRole(SystemRole::Cashier->value);

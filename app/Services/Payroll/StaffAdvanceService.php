@@ -241,6 +241,79 @@ class StaffAdvanceService
         return $advance->refresh();
     }
 
+    /** The advance a payment was raised for on the unified payment screen ("staff_advance:ID"), if any. */
+    public static function advanceIdFrom(?string $sourceReference): ?int
+    {
+        return preg_match('/^staff_advance:(\d+)$/', (string) $sourceReference, $match) === 1 ? (int) $match[1] : null;
+    }
+
+    /**
+     * Link a payment raised for an advance as soon as it is posted, inside the
+     * posting transaction (called by OperationalTransactionService::post). It
+     * applies the same checks as a manual link; if the advance is no longer an
+     * approved, undisbursed advance the whole posting is refused, so money is
+     * never paid out for a cancelled or already-paid advance. Linking the same
+     * payment twice does nothing.
+     */
+    public function linkPostedPayment(OperationalTransaction $transaction, User $actor): ?StaffAdvance
+    {
+        $advanceId = self::advanceIdFrom($transaction->source_reference);
+        if ($advanceId === null) {
+            return null;
+        }
+        $advance = StaffAdvance::query()->with('component')->lockForUpdate()->find($advanceId);
+        if ($advance && (int) $advance->disbursement_transaction_id === $transaction->id) {
+            return $advance;
+        }
+        if (! $advance || $advance->status !== StaffAdvanceStatus::Approved || $advance->disbursement_transaction_id !== null
+            || ! $this->eligibleDisbursements($advance)->contains('id', $transaction->id)) {
+            throw ValidationException::withMessages(['status' => 'This payment is for a staff advance that is no longer an approved, undisbursed advance of this amount, ledger and branch. It cannot be posted.']);
+        }
+        $advance->update(['disbursement_transaction_id' => $transaction->id, 'disbursement_linked_by' => $actor->id, 'disbursed_at' => $transaction->posted_at ?? now(), 'status' => StaffAdvanceStatus::Active]);
+        $this->record($advance, 'disbursed', StaffAdvanceStatus::Approved, $actor, 'Payment #'.$transaction->id.' posted and linked automatically as the payout.');
+        $this->audit->log('staff_advances.disbursement_linked', $advance, ['reference' => $advance->reference, 'operational_transaction_id' => $transaction->id, 'amount' => (string) $transaction->amount, 'automatic' => true], $actor);
+        $this->recovery->syncAdvance($advance->refresh());
+
+        return $advance;
+    }
+
+    /**
+     * Called inside OperationalTransactionService::reverse before the journal is
+     * reversed. Locks the advance this payment paid out, if any. Reversal is
+     * refused once recovery has started (anything recovered, an instalment
+     * allocated to a payroll line, or a live payroll run deducting the recovery
+     * component), because reopening the advance would leave those deductions
+     * without the payout they recover.
+     */
+    public function lockForPaymentReversal(OperationalTransaction $transaction): ?StaffAdvance
+    {
+        $advance = StaffAdvance::query()->with('instalments')->where('disbursement_transaction_id', $transaction->id)->lockForUpdate()->first();
+        if (! $advance) {
+            return null;
+        }
+        $recoveryStarted = $advance->status !== StaffAdvanceStatus::Active
+            || ! AccountingDecimal::of($advance->recoveredAmount())->isZero()
+            || $advance->instalments->contains(fn ($instalment): bool => $instalment->payroll_run_line_id !== null)
+            || $this->recovery->hasRecoveryDeductions((int) $advance->employee_id, (int) $advance->payroll_component_id);
+        if ($recoveryStarted) {
+            throw ValidationException::withMessages(['status' => "This payment paid out staff advance {$advance->reference}, whose recovery through payroll has already started. It cannot be reversed here; correct the payroll recovery first."]);
+        }
+
+        return $advance;
+    }
+
+    /**
+     * After the payment's journal is reversed (same transaction): the advance
+     * returns to Approved without a payout, so a new authorized payment can
+     * disburse it. Its approval and history are kept.
+     */
+    public function reopenAfterPaymentReversal(StaffAdvance $advance, OperationalTransaction $transaction, string $reason, User $actor): void
+    {
+        $advance->update(['status' => StaffAdvanceStatus::Approved, 'disbursement_transaction_id' => null, 'disbursement_linked_by' => null, 'disbursed_at' => null]);
+        $this->record($advance, 'disbursement_reversed', StaffAdvanceStatus::Active, $actor, 'Payment #'.$transaction->id.' was reversed ('.$reason.'). The advance is approved and awaits a new payout.');
+        $this->audit->log('staff_advances.disbursement_reversed', $advance, ['reference' => $advance->reference, 'operational_transaction_id' => $transaction->id, 'reason' => $reason], $actor);
+    }
+
     /** Whether the user may approve or return this submitted advance right now. */
     public function canApprove(StaffAdvance $advance, User $actor): bool
     {

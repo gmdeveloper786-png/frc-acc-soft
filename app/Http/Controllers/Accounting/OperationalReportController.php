@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Accounting;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
 use App\Http\Controllers\Controller;
+use App\Models\Branch;
 use App\Models\FinancialAccount;
 use App\Models\JournalLine;
 use App\Models\OperationalTransaction;
@@ -139,7 +140,7 @@ class OperationalReportController extends Controller
     /** @return Collection<int, FinancialAccount> */
     private function financialAccounts(Request $request, BranchAccess $access, string $kind): Collection
     {
-        return FinancialAccount::query()->with(['account', 'branch'])->where('type', $kind)->whereIn('branch_id', $access->scope($request->user())->select('id'))->orderBy('name')->get();
+        return FinancialAccount::query()->with(['account', 'branch'])->where('type', $kind)->usableIn($access->scope($request->user())->select('id'))->orderBy('name')->get();
     }
 
     /**
@@ -161,7 +162,9 @@ class OperationalReportController extends Controller
             ->whereIn('account_id', $financialAccounts->pluck('account_id'))->whereHas('journalEntry', fn ($q) => $q->whereIn('status', ['posted', 'reversed'])->whereIn('branch_id', $access->scope($request->user())->select('id'))
             ->where(function ($pairs) use ($financialAccounts): void {
                 foreach ($financialAccounts as $account) {
-                    $pairs->orWhere(fn ($pair) => $pair->where('journal_entries.branch_id', $account->branch_id)->where('journal_lines.account_id', $account->account_id));
+                    // A shared account's book spans branches; the outer branch filter still limits it to the user's branches.
+                    $pairs->orWhere(fn ($pair) => $pair->where('journal_lines.account_id', $account->account_id)
+                        ->when(! $account->isShared(), fn ($own) => $own->where('journal_entries.branch_id', $account->branch_id)));
                 }
             })
             ->when($request->filled('from'), fn ($q) => $q->whereDate('transaction_date', '>=', $request->date('from')))
@@ -174,24 +177,47 @@ class OperationalReportController extends Controller
      */
     private function accountNames(Collection $financialAccounts): array
     {
-        return $financialAccounts->mapWithKeys(fn (FinancialAccount $account): array => [$account->account_id.':'.$account->branch_id => $account->name])->all();
+        $branchIds = $financialAccounts->contains(fn (FinancialAccount $account): bool => $account->isShared()) ? Branch::query()->pluck('id') : collect();
+
+        return $financialAccounts->flatMap(fn (FinancialAccount $account): array => $account->isShared()
+            ? $branchIds->mapWithKeys(fn (int $branchId): array => [$account->account_id.':'.$branchId => $account->name])->all()
+            : [$account->account_id.':'.$account->branch_id => $account->name])->all();
     }
 
     /** @return Builder<OperationalTransaction> */
     private function registerTransactions(Request $request, BranchAccess $access, string $kind): Builder
     {
+        $base = OperationalTransaction::query()->with(['branch', 'financialAccount', 'vendor', 'donationCategory', 'journalEntry'])
+            ->where('status', OperationalTransactionStatus::Posted)
+            ->whereIn('branch_id', $access->scope($request->user())->select('id'))
+            ->when($request->filled('from'), fn ($q) => $q->whereDate('transaction_date', '>=', $request->date('from')))
+            ->when($request->filled('to'), fn ($q) => $q->whereDate('transaction_date', '<=', $request->date('to')));
+
+        if ($kind === 'payments') {
+            $paymentTypes = [
+                OperationalTransactionType::CashPayment,
+                OperationalTransactionType::BankPayment,
+                OperationalTransactionType::VendorPayment,
+                OperationalTransactionType::PettyCash,
+            ];
+
+            return $base->where(function (Builder $query) use ($paymentTypes): void {
+                $query->whereIn('type', $paymentTypes)
+                    ->orWhere(function (Builder $q): void {
+                        $q->where('type', OperationalTransactionType::Expense->value)
+                            ->where('settlement_type', 'paid');
+                    });
+            });
+        }
+
         $types = match ($kind) {
             'receipts' => [OperationalTransactionType::CashReceipt, OperationalTransactionType::BankReceipt],
-            'payments' => [OperationalTransactionType::CashPayment, OperationalTransactionType::BankPayment, OperationalTransactionType::VendorPayment],
             'expenses' => [OperationalTransactionType::Expense, OperationalTransactionType::PettyCash],
             'donations' => [OperationalTransactionType::Donation],
             default => abort(404),
         };
 
-        return OperationalTransaction::query()->with(['branch', 'financialAccount', 'vendor', 'donationCategory', 'journalEntry'])
-            ->where('status', OperationalTransactionStatus::Posted)->whereIn('type', $types)->whereIn('branch_id', $access->scope($request->user())->select('id'))
-            ->when($request->filled('from'), fn ($q) => $q->whereDate('transaction_date', '>=', $request->date('from')))
-            ->when($request->filled('to'), fn ($q) => $q->whereDate('transaction_date', '<=', $request->date('to')));
+        return $base->whereIn('type', $types);
     }
 
     private function vendor(Request $request): ?Vendor

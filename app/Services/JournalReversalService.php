@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Enums\JournalStatus;
 use App\Models\AccountingPeriod;
+use App\Models\BankReconciliation;
+use App\Models\BankReconciliationMatch;
 use App\Models\JournalEntry;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -70,6 +72,7 @@ class JournalReversalService
                 throw ValidationException::withMessages(['approval' => $error]);
             }
             $this->assertDateNotBefore($original, $reversal->transaction_date->toDateString());
+            $this->assertNotReconciled($original);
             $this->validator->validate($reversal);
             $basis = $this->authority->journalApprovalBasis($actor, $original->branch, $original->total_debit);
             if ($basis === null) {
@@ -100,6 +103,7 @@ class JournalReversalService
                 throw ValidationException::withMessages(['approval' => 'The user who requested or approved a reversal cannot post it.']);
             }
             $this->assertDateNotBefore($original, $reversal->transaction_date->toDateString());
+            $this->assertNotReconciled($original);
             $approver = User::query()->find($reversal->approved_by);
             if (! $approver || $this->approvalSeparationError($reversal, $original, $approver) || $this->authority->journalApprovalBasis($approver, $original->branch, $original->total_debit) === null) {
                 throw ValidationException::withMessages(['approval' => 'The approval is no longer valid. Return the reversal so an eligible approver can approve it again.']);
@@ -195,8 +199,35 @@ class JournalReversalService
             $original->source_type === YearEndClosingService::SOURCE_TYPE => 'Year-end closing journals have no reversal workflow yet. They stay protected until a dedicated reopening procedure is approved.',
             filled($original->source_type) => 'This journal was posted by a source document. Reverse that document through its own workflow instead.',
             $original->reversal()->exists() => 'A reversal of this journal is already pending or posted.',
-            default => null,
+            default => $this->reconciliationBlockedReason($original),
         };
+    }
+
+    /**
+     * Why a journal cannot be reversed because a bank reconciliation has matched one of its lines, or
+     * null. A match exists only while it counts: unmatching it, or cancelling its draft reconciliation,
+     * removes it, so a released match never blocks. This never changes the reconciliation itself.
+     */
+    public function reconciliationBlockedReason(JournalEntry $original): ?string
+    {
+        $match = BankReconciliationMatch::query()->with('reconciliation')->whereIn('journal_line_id', $original->lines()->select('id'))->first();
+        if (! $match) {
+            return null;
+        }
+        $reconciliation = $match->reconciliation;
+
+        return match ($reconciliation->status) {
+            BankReconciliation::APPROVED => "A bank line of this journal is cleared in approved bank reconciliation #{$reconciliation->id}, which is locked. It cannot be reversed.",
+            BankReconciliation::SUBMITTED => "A bank line of this journal is matched in bank reconciliation #{$reconciliation->id}, awaiting approval. Have it returned and unmatch the line before reversing.",
+            default => "A bank line of this journal is matched in bank reconciliation #{$reconciliation->id}. Unmatch it there before reversing.",
+        };
+    }
+
+    private function assertNotReconciled(JournalEntry $original): void
+    {
+        if ($reason = $this->reconciliationBlockedReason($original)) {
+            throw ValidationException::withMessages(['status' => $reason]);
+        }
     }
 
     /**
@@ -214,6 +245,7 @@ class JournalReversalService
             if ($original->status !== JournalStatus::Posted || $original->reversal()->exists()) {
                 throw ValidationException::withMessages(['status' => 'This journal is not eligible for another reversal.']);
             }
+            $this->assertNotReconciled($original);
             $reversal = $this->build($original, $period, $date, $reason, $actor, JournalStatus::Approved);
 
             $posted = $this->posting->postSystem($reversal, $actor);

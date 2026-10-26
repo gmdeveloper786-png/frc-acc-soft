@@ -8,7 +8,8 @@
 @error('statement_file')<div class="alert alert-danger">{{ $message }}</div>@enderror
 @error('statement')<div class="alert alert-danger">{{ $message }}</div>@enderror
 
-@can('bank_reconciliation.prepare')
+{{-- $accounts are the bank accounts this user may upload statements for (shared accounts need access to every branch). --}}
+@if(auth()->user()->can('bank_reconciliation.prepare') && $accounts->isNotEmpty())
 <form method="POST" action="{{ route('bank-statements.store') }}" enctype="multipart/form-data" data-submit-once>@csrf
 <section class="surface-card mb-4">
     <div class="card-heading"><div><span class="section-kicker">Step 1 — upload; nothing is imported until the columns are mapped</span><h2>Upload a statement</h2></div></div>
@@ -25,7 +26,9 @@
     </div>
 </section>
 </form>
-@endcan
+@elseif(auth()->user()->can('bank_reconciliation.prepare'))
+<div class="alert alert-info mb-4">No bank accounts available for statement upload.</div>
+@endif
 
 <section class="surface-card">
     <form class="filter-bar" method="GET">

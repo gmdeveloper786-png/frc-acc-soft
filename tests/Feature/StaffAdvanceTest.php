@@ -11,16 +11,21 @@ use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\AccountMapping;
 use App\Models\AppSetting;
+use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Employee;
 use App\Models\FinancialAccount;
 use App\Models\FiscalYear;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
+use App\Models\PayeeType;
+use App\Models\PaymentPurpose;
 use App\Models\PayrollComponent;
 use App\Models\PayrollRun;
 use App\Models\StaffAdvance;
 use App\Models\User;
+use App\Services\OperationalTransactionService;
+use App\Services\Payments\UnifiedPaymentService;
 use App\Services\Payroll\PayrollRunService;
 use App\Services\Payroll\StaffAdvanceRecoveryService;
 use App\Services\Payroll\StaffAdvanceService;
@@ -374,4 +379,166 @@ test('outstanding report access, content, export and branch isolation', function
     $noExport->branches()->attach($this->branch);
     $this->actingAs($noExport)->get(route('payroll-reports.show', 'advances-outstanding'))->assertOk()->assertSee('2,468.24');
     $this->actingAs($noExport)->get(route('payroll-reports.export', ['report' => 'advances-outstanding', 'format' => 'csv']))->assertForbidden();
+});
+
+test('a unified advance payment is linked to the advance automatically when posted, once, and never for a cancelled advance', function () {
+    $advance = advanceApproved($this);
+    $bank = FinancialAccount::factory()->create(['type' => 'bank', 'branch_id' => $this->branch, 'account_id' => Account::factory()]);
+    $payments = app(UnifiedPaymentService::class);
+    $engine = app(OperationalTransactionService::class);
+    $data = fn (StaffAdvance $advance) => ['payment_purpose_id' => PaymentPurpose::query()->where('code', 'staff_advance')->value('id'),
+        'payee_type_id' => PayeeType::query()->where('code', 'employee')->value('id'), 'payee_employee_id' => $advance->employee_id,
+        'staff_advance_id' => $advance->id, 'branch_id' => $this->branch->id, 'transaction_date' => '2026-01-20', 'financial_account_id' => $bank->id, 'amount' => (string) $advance->principal_amount];
+    $settle = function (OperationalTransaction $payment) use ($engine): OperationalTransaction {
+        $engine->submit($payment, $this->administrator);
+        $engine->approve($payment->fresh(), $this->approver);
+        $engine->disburse($payment->fresh(), $this->administrator);
+
+        return $engine->post($payment->fresh(), $this->administrator);
+    };
+
+    expect(fn () => $payments->create([...$data($advance), 'amount' => '1.00'], $this->administrator))->toThrow(ValidationException::class, 'full approved amount')
+        ->and(fn () => $payments->create([...$data($advance), 'payee_employee_id' => Employee::factory()->create(['branch_id' => $this->branch->id, 'created_by' => $this->maker->id])->id], $this->administrator))->toThrow(ValidationException::class, 'different employee');
+    $payment = $payments->create($data($advance), $this->administrator);
+    expect($payment->contra_account_id)->toBe($this->advanceLedger->id)->and($payment->source_reference)->toBe('staff_advance:'.$advance->id)
+        ->and($payment->payee_employee_id)->toBe($advance->employee_id)
+        ->and(fn () => $payments->create($data($advance), $this->administrator))->toThrow(ValidationException::class, 'already exists');
+
+    $posted = $settle($payment);
+    $advance->refresh();
+    expect($posted->status)->toBe(OperationalTransactionStatus::Posted)->and($advance->disbursement_transaction_id)->toBe($payment->id)
+        ->and($advance->status)->toBe(StaffAdvanceStatus::Active)
+        ->and(AuditLog::query()->where('event', 'staff_advances.disbursement_linked')->where('auditable_id', $advance->id)->value('properties'))->toMatchArray(['automatic' => true])
+        ->and(app(StaffAdvanceService::class)->linkPostedPayment($payment->fresh(), $this->administrator)->id)->toBe($advance->id);
+
+    // An advance cancelled while its payment was in progress cannot be paid out: posting is refused and nothing is journalled.
+    $second = advanceApproved($this, ['principal_amount' => '2000.0000']);
+    $pending = $payments->create($data($second), $this->administrator);
+    $engine->submit($pending, $this->administrator);
+    $engine->approve($pending->fresh(), $this->approver);
+    $engine->disburse($pending->fresh(), $this->administrator);
+    $this->service->cancel($second->fresh(), 'Employee withdrew the request', $this->approver);
+    expect(fn () => $engine->post($pending->fresh(), $this->administrator))->toThrow(ValidationException::class, 'no longer an approved')
+        ->and($pending->fresh()->status)->toBe(OperationalTransactionStatus::Disbursed)->and($pending->fresh()->journal_entry_id)->toBeNull();
+});
+
+test('reversing a posted advance payment reopens the advance for a new payout, once, and only before recovery starts', function () {
+    advanceConfigurePayroll($this);
+    $bank = FinancialAccount::factory()->create(['type' => 'bank', 'branch_id' => $this->branch, 'account_id' => Account::factory()]);
+    $payments = app(UnifiedPaymentService::class);
+    $engine = app(OperationalTransactionService::class);
+    $pay = function (StaffAdvance $advance) use ($bank, $payments, $engine): OperationalTransaction {
+        $payment = $payments->create(['payment_purpose_id' => PaymentPurpose::query()->where('code', 'staff_advance')->value('id'),
+            'payee_type_id' => PayeeType::query()->where('code', 'employee')->value('id'), 'payee_employee_id' => $advance->employee_id,
+            'staff_advance_id' => $advance->id, 'branch_id' => $this->branch->id, 'transaction_date' => '2026-01-20', 'financial_account_id' => $bank->id, 'amount' => (string) $advance->principal_amount], $this->administrator);
+        $engine->submit($payment, $this->administrator);
+        $engine->approve($payment->fresh(), $this->approver);
+        $engine->disburse($payment->fresh(), $this->administrator);
+
+        return $engine->post($payment->fresh(), $this->administrator);
+    };
+    $reverse = fn (OperationalTransaction $payment, ?AccountingPeriod $period = null, string $date = '2026-01-25') => $engine->reverse($payment->fresh(), $period ?? $this->periods[0], $date, 'Paid to the wrong account', $this->administrator);
+    $advance = advanceApproved($this);
+    $payment = $pay($advance);
+    expect($advance->fresh()->status)->toBe(StaffAdvanceStatus::Active);
+
+    // A reversal that fails (closed period) changes nothing.
+    $this->periods[1]->update(['status' => AccountingPeriodStatus::Closed]);
+    expect(fn () => $reverse($payment, $this->periods[1], '2026-02-10'))->toThrow(ValidationException::class)
+        ->and($payment->fresh()->status)->toBe(OperationalTransactionStatus::Posted)
+        ->and($advance->fresh()->status)->toBe(StaffAdvanceStatus::Active)->and($advance->fresh()->disbursement_transaction_id)->toBe($payment->id);
+
+    $journals = JournalEntry::query()->count();
+    $reverse($payment);
+    $advance->refresh();
+    expect($payment->fresh()->status)->toBe(OperationalTransactionStatus::Reversed)
+        ->and($advance->status)->toBe(StaffAdvanceStatus::Approved)->and($advance->disbursement_transaction_id)->toBeNull()->and($advance->disbursed_at)->toBeNull()
+        ->and($advance->approved_by)->not->toBeNull()
+        ->and($advance->history()->where('action', 'disbursement_reversed')->exists())->toBeTrue()
+        ->and(AuditLog::query()->where('event', 'staff_advances.disbursement_reversed')->where('auditable_id', $advance->id)->exists())->toBeTrue()
+        ->and(JournalEntry::query()->count())->toBe($journals + 1);
+
+    // A second reversal is refused and changes nothing.
+    expect(fn () => $reverse($payment))->toThrow(ValidationException::class, 'Only a posted transaction')
+        ->and($advance->fresh()->status)->toBe(StaffAdvanceStatus::Approved)->and(JournalEntry::query()->count())->toBe($journals + 1);
+
+    // The reopened advance can be paid out again and is linked to the new payment.
+    $again = $pay($advance->fresh());
+    expect($advance->fresh()->disbursement_transaction_id)->toBe($again->id)->and($advance->fresh()->status)->toBe(StaffAdvanceStatus::Active);
+
+    // Once a payroll run deducts the recovery, the payout cannot be reversed and the advance is not reopened.
+    $run = app(PayrollRunService::class)->createFromStructures(['branch_id' => $this->branch->id, 'accounting_period_id' => $this->periods[0]->id], $this->maker);
+    $this->service->applyDueRecoveries($run, $this->maker);
+    expect(fn () => $reverse($again))->toThrow(ValidationException::class, 'recovery through payroll has already started')
+        ->and($again->fresh()->status)->toBe(OperationalTransactionStatus::Posted)
+        ->and($advance->fresh()->status)->toBe(StaffAdvanceStatus::Active)->and($advance->fresh()->disbursement_transaction_id)->toBe($again->id);
+});
+
+test('a cash advance payment from the unified screen is linked when posted and reopens the advance when reversed', function () {
+    $advance = advanceApproved($this);
+    $cash = FinancialAccount::factory()->create(['type' => 'cash', 'branch_id' => $this->branch, 'account_id' => Account::factory()]);
+    $engine = app(OperationalTransactionService::class);
+    $payment = app(UnifiedPaymentService::class)->create(['payment_source' => 'cash',
+        'payment_purpose_id' => PaymentPurpose::query()->where('code', 'staff_advance')->value('id'),
+        'payee_type_id' => PayeeType::query()->where('code', 'employee')->value('id'), 'payee_employee_id' => $advance->employee_id,
+        'staff_advance_id' => $advance->id, 'branch_id' => $this->branch->id, 'transaction_date' => '2026-01-20', 'financial_account_id' => $cash->id, 'amount' => (string) $advance->principal_amount], $this->administrator);
+    expect($payment->type)->toBe(OperationalTransactionType::CashPayment);
+
+    $engine->submit($payment, $this->administrator);
+    $engine->approve($payment->fresh(), $this->approver);
+    $engine->disburse($payment->fresh(), $this->administrator);
+    $engine->post($payment->fresh(), $this->administrator);
+    expect($advance->fresh()->status)->toBe(StaffAdvanceStatus::Active)->and($advance->fresh()->disbursement_transaction_id)->toBe($payment->id);
+
+    $engine->reverse($payment->fresh(), $this->periods[0], '2026-01-25', 'Paid twice', $this->administrator);
+    expect($advance->fresh()->status)->toBe(StaffAdvanceStatus::Approved)->and($advance->fresh()->disbursement_transaction_id)->toBeNull();
+});
+
+test('the advance page pays through the unified payment screen, prefilled only for an approved, undisbursed advance the user may pay', function () {
+    $advance = advanceApproved($this);
+    $bank = FinancialAccount::factory()->create(['type' => 'bank', 'branch_id' => $this->branch, 'account_id' => Account::factory()]);
+    $this->actingAs($this->administrator)->get(route('staff-advances.show', $advance))->assertOk()
+        ->assertSee('href="'.e(route('payments.create', ['advance' => $advance->id, 'source' => 'bank'])).'"', false)->assertDontSee(route('transactions.create', 'bank_payment'));
+
+    // Opening the screen saves nothing and starts on the advance's branch, purpose, employee, advance, amount and chosen source.
+    $count = OperationalTransaction::query()->count();
+    $form = $this->get(route('payments.create', ['advance' => $advance->id, 'source' => 'bank']))->assertOk()->getContent();
+    expect(OperationalTransaction::query()->count())->toBe($count)
+        ->and($form)->toContain('data-prefill-advance="'.$advance->id.'"')->toContain('name="amount" value="1000.00"')
+        ->toContain('<option value="bank" selected')->toContain('<option value="'.$this->branch->id.'" selected')
+        ->and(preg_match('/<option value="'.$advance->employee_id.'"[^>]*selected/', $form))->toBe(1);
+
+    // Another branch's user, a cancelled advance and an unknown ID are not prefilled.
+    $outsider = advanceUser(SystemRole::Administrator, $this->otherBranch);
+    $outsider->syncRoles([SystemRole::Accountant->value]);
+    $this->actingAs($outsider)->get(route('payments.create', ['advance' => $advance->id]))->assertOk()->assertSee('data-prefill-advance=""', false);
+    $cancelled = advanceApproved($this, ['principal_amount' => '500']);
+    $this->service->cancel($cancelled->fresh(), 'No longer needed here', $this->approver);
+    foreach ([$cancelled->id, 999999] as $id) {
+        $this->actingAs($this->administrator)->get(route('payments.create', ['advance' => $id]))->assertOk()->assertSee('data-prefill-advance=""', false);
+    }
+
+    // Submitted from the screen it is linked through the advance; a tampered amount is refused, and a second payment for it too.
+    $post = fn (array $overrides = []) => $this->post(route('payments.store'), ['payment_source' => 'bank', 'payment_purpose_id' => PaymentPurpose::query()->where('code', 'staff_advance')->value('id'),
+        'payee_type_id' => PayeeType::query()->where('code', 'employee')->value('id'), 'payee_employee_id' => $advance->employee_id, 'staff_advance_id' => $advance->id,
+        'branch_id' => $this->branch->id, 'transaction_date' => '2026-01-20', 'financial_account_id' => $bank->id, 'amount' => '1000.00', ...$overrides]);
+    $post(['amount' => '999.00'])->assertSessionHasErrors('amount');
+    $post(['staff_advance_id' => $cancelled->id])->assertSessionHasErrors('staff_advance_id');
+    $post()->assertSessionHasNoErrors()->assertRedirect();
+    $payment = OperationalTransaction::query()->latest('id')->firstOrFail();
+    expect($payment->source_reference)->toBe('staff_advance:'.$advance->id)->and($payment->contra_account_id)->toBe($this->advanceLedger->id);
+    // The draft names its advance (linked to the advance page for users who may open it) before posting records the disbursement.
+    $this->get(route('transactions.show', $payment))->assertOk()->assertSee('Linked staff advance')
+        ->assertSee('href="'.route('staff-advances.show', $advance).'"', false)->assertSee($advance->reference)->assertSee("Recorded as the advance's disbursement when posted", false);
+    $payer = advanceUser(SystemRole::Administrator, $this->branch);
+    $payer->syncPermissions([]);
+    $payer->syncRoles([]);
+    $payer->givePermissionTo(['payments.view']);
+    $this->actingAs($payer)->get(route('transactions.show', $payment))->assertOk()->assertSee($advance->reference)->assertDontSee(route('staff-advances.show', $advance));
+    $this->get(route('transactions.show', OperationalTransaction::factory()->create(['type' => OperationalTransactionType::BankPayment, 'branch_id' => $this->branch->id, 'created_by' => $this->maker->id])))
+        ->assertOk()->assertDontSee('data-linked-advance', false);
+    $this->actingAs($this->administrator);
+    $post()->assertSessionHasErrors('staff_advance_id');
+    $this->get(route('payments.create', ['advance' => $advance->id]))->assertSee('data-prefill-advance=""', false);
+    expect(OperationalTransaction::query()->where('source_reference', 'staff_advance:'.$advance->id)->count())->toBe(1);
 });

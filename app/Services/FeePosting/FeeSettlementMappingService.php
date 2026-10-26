@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\AccountMappingService;
 use App\Services\AuditLogger;
 use App\Services\BranchAccess;
+use App\Services\PettyCash\ImprestLedgerService;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -30,7 +31,7 @@ class FeeSettlementMappingService
         'other' => 'Other',
     ];
 
-    public function __construct(private BranchAccess $branchAccess, private AccountMappingService $accountMappings, private AuditLogger $audit) {}
+    public function __construct(private BranchAccess $branchAccess, private AccountMappingService $accountMappings, private AuditLogger $audit, private ImprestLedgerService $imprest) {}
 
     /** Financial account type a method must settle into. */
     public static function requiredType(string $method): string
@@ -114,8 +115,11 @@ class FeeSettlementMappingService
         if (! $account->is_active) {
             return "Account {$account->name} is inactive.";
         }
-        if ((int) $account->branch_id !== $branchId) {
+        if (! $account->usableIn($branchId)) {
             return "Account {$account->name} belongs to another branch.";
+        }
+        if ($this->imprest->activeFloatFor($account) !== null) {
+            return "Account {$account->name} holds a petty cash imprest float; fee receipts cannot be deposited into it.";
         }
         $required = self::requiredType($method);
         if ($account->type !== $required) {
@@ -133,7 +137,7 @@ class FeeSettlementMappingService
     /** @return Collection<int, FinancialAccount> */
     public function candidateAccounts(int $branchId): Collection
     {
-        return FinancialAccount::query()->with('account')->where('branch_id', $branchId)->where('is_active', true)->orderBy('type')->orderBy('name')->get()
+        return FinancialAccount::query()->with('account')->usableIn($branchId)->where('is_active', true)->orderBy('type')->orderBy('name')->get()
             ->filter(fn (FinancialAccount $account): bool => $this->accountMappings->isUsable($account->account, AccountType::Asset))->values();
     }
 }

@@ -2,11 +2,13 @@
 
 namespace App\Services\BankReconciliation;
 
+use App\Enums\JournalStatus;
 use App\Models\BankReconciliation;
 use App\Models\BankReconciliationMatch;
 use App\Models\BankStatement;
 use App\Models\BankStatementLine;
 use App\Models\FinancialAccount;
+use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\User;
 use App\Services\AccountingDecimal;
@@ -147,6 +149,34 @@ class ReconciliationService
         });
     }
 
+    /**
+     * Cancel an abandoned draft. Every match and brought-forward clearance of the
+     * draft is released exactly as Unmatch would release it, lines ignored in it
+     * are restored, and the account is free for a new reconciliation. The draft
+     * stays on record as cancelled; the reason and a snapshot of what was
+     * released go to the audit log. Statements and journals are not touched.
+     */
+    public function cancel(BankReconciliation $reconciliation, string $reason, User $actor): BankReconciliation
+    {
+        return $this->editing($reconciliation, $actor, function (BankReconciliation $reconciliation) use ($reason, $actor): BankReconciliation {
+            $matches = BankReconciliationMatch::query()->where('bank_reconciliation_id', $reconciliation->id)->lockForUpdate()->orderBy('id')->get();
+            BankStatementLine::query()->whereKey($matches->pluck('bank_statement_line_id')->filter()->all())->update(['status' => BankStatementLine::UNMATCHED]);
+            $ignored = BankStatementLine::query()->where('ignored_in_reconciliation_id', $reconciliation->id)->where('status', BankStatementLine::IGNORED)->lockForUpdate()->pluck('id');
+            BankStatementLine::query()->whereKey($ignored->all())->update(['status' => BankStatementLine::UNMATCHED, 'ignored_in_reconciliation_id' => null]);
+            BankReconciliationMatch::query()->whereKey($matches->pluck('id')->all())->delete();
+
+            $reconciliation->update(['status' => BankReconciliation::CANCELLED, 'open_key' => null]);
+            $this->audit->log('bank_reconciliation.cancelled', $reconciliation, [
+                'reason' => $reason, 'statement_date' => $reconciliation->statement_date->toDateString(),
+                'statement_closing_balance' => (string) $reconciliation->statement_closing_balance, 'bank_statement_id' => $reconciliation->bank_statement_id,
+                'released_matches' => $matches->map(fn (BankReconciliationMatch $match): array => $match->only(['id', 'match_type', 'bank_statement_line_id', 'journal_line_id', 'matched_by', 'note']))->all(),
+                'restored_ignored_line_ids' => $ignored->all(),
+            ], $actor);
+
+            return $reconciliation->refresh();
+        });
+    }
+
     /** Set aside a statement line that is not a transaction of this account (e.g. a bank error later corrected). */
     public function ignore(BankReconciliation $reconciliation, BankStatementLine $line, User $actor): void
     {
@@ -239,7 +269,8 @@ class ReconciliationService
 
     public function authorizeAccount(FinancialAccount $account, User $actor, string $permission): void
     {
-        abort_unless($actor->can($permission) && $account->type === 'bank' && $this->branchAccess->canAccess($actor, $account->branch), 403);
+        // A shared bank account's statement holds every branch's entries, so it needs access to every branch.
+        abort_unless($actor->can($permission) && $account->type === 'bank' && $account->bookVisibleTo($actor, $this->branchAccess->canAccess($actor, $account->branch)), 403);
     }
 
     /**
@@ -258,9 +289,11 @@ class ReconciliationService
             return DB::transaction(function () use ($reconciliation, $change): mixed {
                 $locked = BankReconciliation::query()->with('financialAccount')->lockForUpdate()->findOrFail($reconciliation->id);
                 if (! $locked->isDraft()) {
-                    throw ValidationException::withMessages(['status' => $locked->isApproved()
-                        ? 'This reconciliation is approved and locked. Matches can no longer change.'
-                        : 'This reconciliation is submitted for approval. It must be returned before matches can change.']);
+                    throw ValidationException::withMessages(['status' => match (true) {
+                        $locked->isApproved() => 'This reconciliation is approved and locked. Matches can no longer change.',
+                        $locked->isCancelled() => 'This reconciliation was cancelled and can no longer change.',
+                        default => 'This reconciliation is submitted for approval. It must be returned before matches can change.',
+                    }]);
                 }
 
                 return $change($locked);
@@ -308,15 +341,19 @@ class ReconciliationService
 
     private function bookLine(BankReconciliation $reconciliation, int $id): JournalLine
     {
-        $line = $this->book->lines($reconciliation->financialAccount, $reconciliation->statement_date)->with('journalEntry')->where('journal_lines.id', $id)->first();
+        $line = $this->book->lines($reconciliation->financialAccount, $reconciliation->statement_date)->where('journal_lines.id', $id)->first();
         if (! $line) {
             throw ValidationException::withMessages(['journal_line_id' => 'Select a posted entry in this account\'s bank book dated on or before the statement date.']);
+        }
+        $journal = JournalEntry::query()->lockForUpdate()->find($line->journal_entry_id);
+        if (! $journal || $journal->status !== JournalStatus::Posted) {
+            throw ValidationException::withMessages(['journal_line_id' => 'Only a currently posted, unreversed book entry can be matched.']);
         }
         if (BankReconciliationMatch::query()->where('journal_line_id', $line->id)->exists()) {
             throw ValidationException::withMessages(['journal_line_id' => 'This book entry has already been matched in a reconciliation of this account.']);
         }
 
-        return $line;
+        return $line->setRelation('journalEntry', $journal);
     }
 
     private function assertAfterLatestApproved(FinancialAccount $account, CarbonImmutable $date, ?int $exceptId = null): void

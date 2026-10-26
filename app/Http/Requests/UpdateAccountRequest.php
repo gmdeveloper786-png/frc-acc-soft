@@ -2,8 +2,6 @@
 
 namespace App\Http\Requests;
 
-use Illuminate\Validation\Rule;
-
 class UpdateAccountRequest extends StoreAccountRequest
 {
     /**
@@ -22,8 +20,17 @@ class UpdateAccountRequest extends StoreAccountRequest
     public function rules(): array
     {
         $rules = $this->accountRules();
-        $rules['code'] = ['required', 'string', 'max:50', 'regex:/^[A-Za-z0-9._-]+$/', Rule::unique('accounts', 'code')->ignore($this->route('account'))];
+        // Structure is fixed after creation: these may be repeated but AccountService refuses any change to them.
+        foreach (['code', 'parent_id', 'account_type', 'level', 'normal_balance', 'financial_statement', 'is_postable'] as $field) {
+            $rules[$field] = ['sometimes', ...array_values(array_diff((array) $rules[$field], ['required']))];
+        }
+        $rules['code'] = ['sometimes', 'string', 'max:50'];
 
         return $rules;
+    }
+
+    public function messages(): array
+    {
+        return [];
     }
 }

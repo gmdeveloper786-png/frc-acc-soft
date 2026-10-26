@@ -25,7 +25,7 @@ class PayableObligationController extends Controller
         return view('accounting.payable-obligations.settle', [
             'obligation' => $payableObligation,
             'outstanding' => $outstanding,
-            'financialAccounts' => FinancialAccount::query()->where('branch_id', $payableObligation->branch_id)->where('is_active', true)->orderBy('name')->get(),
+            'financialAccounts' => FinancialAccount::query()->usableIn((int) $payableObligation->branch_id)->where('is_active', true)->orderBy('name')->get(),
             'settlementRequestToken' => (string) Str::uuid(),
         ]);
     }

@@ -147,7 +147,7 @@ class LedgerReportTables
             $rows[] = [
                 'date' => $transaction->transaction_date->format('d M Y'),
                 'voucher' => $transaction->journalEntry?->voucher_number,
-                'type' => $transaction->type->label(),
+                'type' => $transaction->paymentTypeLabel(),
                 'branch' => $transaction->branch->name,
                 'party' => $transaction->vendor?->name ?: $transaction->party_name,
                 'amount' => $transaction->amount,
