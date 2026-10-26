@@ -25,7 +25,6 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
-/docs
 payroll.xlsx
 # Restricted MySQL QA account for tests/Qa and tests/Concurrency (never commit)
 .env.qa-mysql
