@@ -222,8 +222,18 @@ class ReportExporter
     /** @return list<float> */
     private function columnWidths(ReportTable $table, float $usable): array
     {
-        $weights = array_map(fn (array $column): float => in_array($column['type'] ?? 'text', self::NUMERIC_TYPES, true) ? 1.0 : 2.2, $table->columns);
-        $weights[0] = max($weights[0], 2.6);
+        $weights = array_map(function (array $column): float {
+            if (isset($column['weight'])) {
+                return (float) $column['weight'];
+            }
+            if (in_array($column['key'] ?? '', ['running_side', 'side', 'dr_cr', 'd_c'], true)) {
+                return 0.6;
+            }
+
+            return in_array($column['type'] ?? 'text', self::NUMERIC_TYPES, true) ? 1.4 : 2.0;
+        }, $table->columns);
+
+        $weights[0] = max($weights[0], 2.2);
         $total = array_sum($weights);
 
         return array_map(fn (float $weight): float => $usable * $weight / $total, $weights);
