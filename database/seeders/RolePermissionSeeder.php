@@ -51,7 +51,7 @@ class RolePermissionSeeder extends Seeder
             'payments.view', 'payments.create', 'payments.update', 'payments.submit', 'payments.approve', 'payments.approve_high_value', 'payments.disburse', 'payments.post', 'payments.reverse',
             'expenses.view', 'expenses.create', 'expenses.update', 'expenses.submit', 'expenses.approve', 'expenses.disburse', 'expenses.post', 'expenses.reverse',
             'vendors.view', 'vendors.create', 'vendors.update', 'vendors.deactivate',
-            'purchase_bills.view', 'purchase_bills.create', 'purchase_bills.update', 'purchase_bills.submit', 'purchase_bills.approve', 'purchase_bills.post', 'purchase_bills.reverse',
+            'purchase_bills.view', 'purchase_bills.create', 'purchase_bills.update', 'purchase_bills.submit', 'purchase_bills.approve', 'purchase_bills.post', 'purchase_bills.reverse', 'purchase_bills.cancel',
             'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'vendor_payments.approve', 'vendor_payments.approve_high_value', 'vendor_payments.disburse', 'vendor_payments.post', 'vendor_payments.reverse',
             'petty_cash.view', 'petty_cash.create', 'petty_cash.update', 'petty_cash.submit', 'petty_cash.approve', 'petty_cash.disburse', 'petty_cash.post', 'petty_cash.reverse',
             'donations.view', 'donations.create', 'donations.post', 'donations.reverse', 'donations.manage_categories',
@@ -98,7 +98,7 @@ class RolePermissionSeeder extends Seeder
         $roles[SystemRole::Accountant->value]['permissions'] = array_merge($roles[SystemRole::Accountant->value]['permissions'], [
             'financial_accounts.view', 'financial_accounts.manage', 'receipts.view', 'receipts.create', 'receipts.post', 'receipts.reverse',
             'payments.update', 'payments.submit', 'payments.disburse', 'payments.reverse', 'expenses.view', 'expenses.create', 'expenses.update', 'expenses.submit', 'expenses.disburse', 'expenses.post', 'expenses.reverse',
-            'vendors.view', 'vendors.create', 'vendors.update', 'vendors.deactivate', 'purchase_bills.view', 'purchase_bills.create', 'purchase_bills.update', 'purchase_bills.submit', 'purchase_bills.post', 'purchase_bills.reverse',
+            'vendors.view', 'vendors.create', 'vendors.update', 'vendors.deactivate', 'purchase_bills.view', 'purchase_bills.create', 'purchase_bills.update', 'purchase_bills.submit', 'purchase_bills.post', 'purchase_bills.reverse', 'purchase_bills.cancel',
             'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'vendor_payments.disburse', 'vendor_payments.post', 'vendor_payments.reverse',
             'petty_cash.view', 'petty_cash.create', 'petty_cash.update', 'petty_cash.submit', 'petty_cash.disburse', 'petty_cash.post', 'petty_cash.reverse',
             'donations.view', 'donations.create', 'donations.post', 'donations.reverse', 'donations.manage_categories', 'cash_books.view', 'bank_books.view', 'finance_reports.view', 'finance_reports.export',

@@ -35,7 +35,7 @@ class PurchaseOrderLine extends Model
     public function billedQuantity(): string
     {
         $billed = $this->billLines()
-            ->whereHas('purchaseBill', fn ($query) => $query->whereNotIn('status', [PurchaseBillStatus::Rejected->value, PurchaseBillStatus::Reversed->value]))
+            ->whereHas('purchaseBill', fn ($query) => $query->whereNotIn('status', [PurchaseBillStatus::Rejected->value, PurchaseBillStatus::Reversed->value, PurchaseBillStatus::Cancelled->value]))
             ->get('quantity')
             ->reduce(fn (BigDecimal $sum, PurchaseBillLine $line): BigDecimal => $sum->plus(AccountingDecimal::of($line->quantity)), BigDecimal::zero()->toScale(4));
 

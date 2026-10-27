@@ -23,7 +23,7 @@
                 <div class="col-md-3">
                     <select class="form-select" name="status">
                         <option value="">All statuses</option>
-                        @foreach (['draft', 'submitted', 'approved', 'posted', 'reversed'] as $status)
+                        @foreach (['draft', 'submitted', 'approved', 'posted', 'reversed', 'cancelled'] as $status)
                             <option @selected(request('status') === $status)>{{ $status }}</option>
                         @endforeach
                     </select>
@@ -56,7 +56,14 @@
                                 <td>{{ $bill->branch->name }}</td>
                                 <td>{{ $bill->status->value }}</td>
                                 <td class="text-end">PKR {{ number_format((float) $bill->total_amount, 2) }}</td>
-                                <td class="text-end">PKR {{ number_format((float) $bill->outstandingAmount(), 2) }}</td>
+                                <td class="text-end" data-outstanding>
+                                    PKR {{ number_format((float) $bill->outstandingAmount(), 2) }}
+                                    @if ($bill->status === \App\Enums\PurchaseBillStatus::Reversed)
+                                        <small class="text-muted">(Reversed)</small>
+                                    @elseif ($bill->status === \App\Enums\PurchaseBillStatus::Cancelled)
+                                        <small class="text-muted">(Cancelled)</small>
+                                    @endif
+                                </td>
                                 <td class="text-nowrap">
                                     <a class="btn btn-sm btn-outline-primary" href="{{ route('purchase-bills.show', $bill) }}">View</a>
                                     @if ($bill->status === \App\Enums\PurchaseBillStatus::Draft)

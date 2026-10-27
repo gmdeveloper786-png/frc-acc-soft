@@ -86,7 +86,7 @@ class PurchaseOrder extends Model
 
     public function activeBills(): HasMany
     {
-        return $this->bills()->whereNotIn('status', [PurchaseBillStatus::Rejected->value, PurchaseBillStatus::Reversed->value]);
+        return $this->bills()->whereNotIn('status', [PurchaseBillStatus::Rejected->value, PurchaseBillStatus::Reversed->value, PurchaseBillStatus::Cancelled->value]);
     }
 
     public function creator(): BelongsTo

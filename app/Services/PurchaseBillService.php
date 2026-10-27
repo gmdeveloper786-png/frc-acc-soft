@@ -238,6 +238,25 @@ class PurchaseBillService
         }, 3);
     }
 
+    /** Whether committed payments block reversal of this posted bill. */
+    public function hasCommittedPayments(PurchaseBill $bill): bool
+    {
+        $committed = [OperationalTransactionStatus::Approved->value, OperationalTransactionStatus::Disbursed->value, OperationalTransactionStatus::Posted->value];
+
+        return $bill->payments()->whereIn('status', $committed)->exists();
+    }
+
+    /** Whether the user may reverse this purchase bill now, for the screen. reverse() checks everything again inside its lock. */
+    public function canReverse(PurchaseBill $bill, User $user): bool
+    {
+        return $bill->status === PurchaseBillStatus::Posted
+            && $bill->journal_entry_id !== null
+            && $user->is_active
+            && $user->can('purchase_bills.reverse')
+            && $this->branchAccess->canAccess($user, $bill->branch)
+            && ! $this->hasCommittedPayments($bill);
+    }
+
     public function reverse(PurchaseBill $bill, AccountingPeriod $period, string $date, string $reason, User $actor): PurchaseBill
     {
         abort_unless($actor->can('purchase_bills.reverse'), 403);
@@ -246,13 +265,53 @@ class PurchaseBillService
             $bill = PurchaseBill::query()->with(['branch', 'journalEntry'])->lockForUpdate()->findOrFail($bill->id);
             $this->guardBranch($bill, $actor);
             // A payment that is approved, disbursed or posted already commits or moved money against this bill.
-            $committed = [OperationalTransactionStatus::Approved->value, OperationalTransactionStatus::Disbursed->value, OperationalTransactionStatus::Posted->value];
-            if ($bill->status !== PurchaseBillStatus::Posted || ! $bill->journalEntry || $bill->payments()->whereIn('status', $committed)->exists()) {
+            if ($bill->status !== PurchaseBillStatus::Posted || ! $bill->journalEntry || $this->hasCommittedPayments($bill)) {
                 throw ValidationException::withMessages(['status' => 'Paid ya unposted bill reverse nahi kiya ja sakta.']);
             }
             $this->reversal->reverse($bill->journalEntry, $period, $date, $reason, $actor);
             $bill->update(['status' => PurchaseBillStatus::Reversed]);
             $this->audit->log('purchase_bills.reversed', $bill, ['reason' => $reason]);
+
+            return $bill->refresh();
+        }, 3);
+    }
+
+    /** Whether the user may cancel this draft purchase bill now, for the screen. cancelDraft() checks everything again inside its lock. */
+    public function canCancelDraft(PurchaseBill $bill, User $user): bool
+    {
+        return $bill->status === PurchaseBillStatus::Draft
+            && $user->is_active
+            && $user->can('purchase_bills.cancel')
+            && $this->branchAccess->canAccess($user, $bill->branch);
+    }
+
+    public function cancelDraft(PurchaseBill $bill, string $reason, User $actor): PurchaseBill
+    {
+        abort_unless($actor->is_active && $actor->can('purchase_bills.cancel'), 403);
+
+        $reason = trim($reason);
+        if (mb_strlen($reason) < 5 || mb_strlen($reason) > 2000) {
+            throw ValidationException::withMessages(['reason' => 'Cancellation reason must be between 5 and 2000 characters.']);
+        }
+
+        return DB::transaction(function () use ($bill, $reason, $actor): PurchaseBill {
+            $bill = PurchaseBill::query()->with('branch')->lockForUpdate()->findOrFail($bill->id);
+            $this->guardBranch($bill, $actor);
+
+            if ($bill->status !== PurchaseBillStatus::Draft) {
+                throw ValidationException::withMessages(['status' => 'Sirf draft purchase bill cancel kiya ja sakta hai.']);
+            }
+
+            $fromStatus = $bill->status;
+            $bill->update(['status' => PurchaseBillStatus::Cancelled]);
+
+            $this->audit->log('purchase_bills.cancelled', $bill, [
+                'from_status' => $fromStatus->value,
+                'reason' => $reason,
+                'cancelled_by' => $actor->id,
+                'bill_number' => $bill->bill_number,
+                'total_amount' => $bill->total_amount,
+            ], $actor);
 
             return $bill->refresh();
         }, 3);

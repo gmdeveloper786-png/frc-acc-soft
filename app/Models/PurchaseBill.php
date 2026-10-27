@@ -26,6 +26,11 @@ class PurchaseBill extends Model
 
     public function outstandingAmount(): string
     {
+        // A reversed or cancelled bill has no active payable; the stored total stays as history.
+        if ($this->status === PurchaseBillStatus::Reversed || $this->status === PurchaseBillStatus::Cancelled) {
+            return AccountingDecimal::string(BigDecimal::zero());
+        }
+
         // List pages eager load postedPayments so this does not run one query per bill.
         $payments = $this->relationLoaded('postedPayments') ? $this->postedPayments : $this->postedPayments()->get(['amount']);
         $paid = $payments
@@ -78,6 +83,10 @@ class PurchaseBill extends Model
     /** What a new payment may still settle: the total less every reserving payment, as the vendor payment workflow enforces. */
     public function availableToPayAmount(): string
     {
+        if ($this->status === PurchaseBillStatus::Reversed || $this->status === PurchaseBillStatus::Cancelled) {
+            return AccountingDecimal::string(BigDecimal::zero());
+        }
+
         $reserved = $this->reservingPayments()->get(['amount'])
             ->reduce(fn (BigDecimal $sum, OperationalTransaction $payment): BigDecimal => $sum->plus(AccountingDecimal::of($payment->amount)), BigDecimal::zero()->toScale(4));
 

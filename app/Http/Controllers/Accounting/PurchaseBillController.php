@@ -10,6 +10,7 @@ use App\Http\Requests\UpdatePurchaseBillRequest;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\AccountMapping;
+use App\Models\AuditLog;
 use App\Models\FrcService;
 use App\Models\PurchaseBill;
 use App\Models\PurchaseOrder;
@@ -68,13 +69,27 @@ class PurchaseBillController extends Controller
     public function show(Request $request, PurchaseBill $purchaseBill, BranchAccess $access, PurchaseBillService $service): View
     {
         abort_unless($access->canAccess($request->user(), $purchaseBill->branch), 403);
-        $purchaseBill->load(['vendor', 'branch', 'payableAccount', 'purchaseOrder', 'lines.account', 'lines.service', 'payments.journalEntry', 'journalEntry', 'creator']);
+        $purchaseBill->load(['vendor', 'branch', 'payableAccount', 'purchaseOrder', 'lines.account', 'lines.service', 'payments.journalEntry', 'journalEntry.reversal', 'creator']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
+        $defaultReversalDate = today()->toDateString();
+        $defaultReversalPeriodId = $openPeriods->first(fn (AccountingPeriod $period): bool => $defaultReversalDate >= $period->start_date->toDateString() && $defaultReversalDate <= $period->end_date->toDateString())?->id;
         $canApprove = $service->canApprove($purchaseBill, $request->user());
         $canReturn = $service->canReturn($purchaseBill, $request->user());
+        $canReverse = $service->canReverse($purchaseBill, $request->user());
+        $canCancelDraft = $service->canCancelDraft($purchaseBill, $request->user());
+        $hasCommittedPayments = $service->hasCommittedPayments($purchaseBill);
         $isPreparer = in_array((int) $request->user()->id, $service->preparerIds($purchaseBill), true);
+        $cancellation = $purchaseBill->status === PurchaseBillStatus::Cancelled
+            ? AuditLog::query()
+                ->where('auditable_type', $purchaseBill->getMorphClass())
+                ->where('auditable_id', $purchaseBill->id)
+                ->where('event', 'purchase_bills.cancelled')
+                ->with('actor')
+                ->latest('id')
+                ->first()
+            : null;
 
-        return view('accounting.purchase-bills.show', compact('purchaseBill', 'openPeriods', 'canApprove', 'canReturn', 'isPreparer'));
+        return view('accounting.purchase-bills.show', compact('purchaseBill', 'openPeriods', 'defaultReversalDate', 'defaultReversalPeriodId', 'canApprove', 'canReturn', 'canReverse', 'canCancelDraft', 'hasCommittedPayments', 'isPreparer', 'cancellation'));
     }
 
     public function edit(Request $request, PurchaseBill $purchaseBill, BranchAccess $access, PurchaseBillDebitAccountEligibility $eligibility): View
@@ -145,5 +160,15 @@ class PurchaseBillController extends Controller
         $service->reverse($purchaseBill, AccountingPeriod::query()->findOrFail($data['accounting_period_id']), $data['transaction_date'], $data['reason'], $request->user());
 
         return back()->with('status', 'Bill reversed.');
+    }
+
+    public function cancelDraft(Request $request, PurchaseBill $purchaseBill, PurchaseBillService $service): RedirectResponse
+    {
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'min:5', 'max:2000'],
+        ]);
+        $service->cancelDraft($purchaseBill, $data['reason'], $request->user());
+
+        return back()->with('status', 'Purchase bill draft cancelled.');
     }
 }

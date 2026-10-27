@@ -198,6 +198,8 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/purchase-bills/{purchaseBill}/reject', [PurchaseBillController::class, 'reject'])->name('purchase-bills.reject');
     Route::post('/purchase-bills/{purchaseBill}/post', [PurchaseBillController::class, 'post'])->name('purchase-bills.post');
     Route::post('/purchase-bills/{purchaseBill}/reverse', [PurchaseBillController::class, 'reverse'])->name('purchase-bills.reverse');
+    Route::post('/purchase-bills/{purchaseBill}/cancel-draft', [PurchaseBillController::class, 'cancelDraft'])->name('purchase-bills.cancel-draft');
+    Route::post('/purchase-bills/{purchaseBill}/cancel', [PurchaseBillController::class, 'cancelDraft'])->name('purchase-bills.cancel');
 
     Route::get('/purchase-orders', [PurchaseOrderController::class, 'index'])->middleware('permission:purchase_orders.view')->name('purchase-orders.index');
     Route::get('/purchase-orders/create', [PurchaseOrderController::class, 'create'])->middleware('permission:purchase_orders.create')->name('purchase-orders.create');

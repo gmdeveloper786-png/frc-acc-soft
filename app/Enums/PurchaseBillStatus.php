@@ -10,4 +10,5 @@ enum PurchaseBillStatus: string
     case Rejected = 'rejected';
     case Posted = 'posted';
     case Reversed = 'reversed';
+    case Cancelled = 'cancelled';
 }
