@@ -121,7 +121,10 @@ class ImprestLedgerService
     /** @return list<int> */
     public function coveredVoucherIds(ImprestFloat $float): array
     {
-        return ImprestReplenishment::query()->where('imprest_float_id', $float->id)->where('status', '!=', ImprestReplenishment::CANCELLED)
+        $this->syncStatuses($float);
+
+        return ImprestReplenishment::query()->where('imprest_float_id', $float->id)
+            ->whereNotIn('status', [ImprestReplenishment::CANCELLED, ImprestReplenishment::REVERSED])
             ->pluck('covered_voucher_ids')->flatten()->map(fn (mixed $id): int => (int) $id)->unique()->values()->all();
     }
 

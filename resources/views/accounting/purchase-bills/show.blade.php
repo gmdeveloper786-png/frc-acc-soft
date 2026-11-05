@@ -5,9 +5,18 @@
 <div class="row g-4">
     <div class="col-lg-8"><div class="card"><div class="card-body">
         <p><strong>{{ $purchaseBill->vendor->name }}</strong> - {{ $purchaseBill->branch->name }} - {{ $purchaseBill->invoice_date->format('d M Y') }}</p>
+        <p><strong>Fund:</strong> {{ $purchaseBill->fund ? ($purchaseBill->fund->code . ' — ' . $purchaseBill->fund->name . ' (' . $purchaseBill->fund->type . ')') : 'No Fund (Historical / Unassigned)' }}</p>
         @if($purchaseBill->purchaseOrder)
-            <p>Purchase order: @can('purchase_orders.view')<a href="{{ route('purchase-orders.show', $purchaseBill->purchaseOrder) }}">{{ $purchaseBill->purchaseOrder->po_number }}</a>@else{{ $purchaseBill->purchaseOrder->po_number }}@endcan @if($purchaseBill->po_exception_status)<span class="status-badge {{ $purchaseBill->po_exception_status === 'approved' ? 'success' : 'pending' }}">PO exception {{ $purchaseBill->po_exception_status }}</span>@endif</p>
-            @if($purchaseBill->po_exception_reason)<div class="alert alert-warning"><strong>Exceeds purchase order - documented exception:</strong> {{ $purchaseBill->po_exception_reason }}@if($purchaseBill->po_exception_status === 'pending') <span class="d-block">Approval requires a user authorized for PO billing exceptions.</span>@endif</div>@endif
+            @php($exceptionDisplay = $purchaseBill->poExceptionDisplay())
+            <p>Purchase order: @can('purchase_orders.view')<a href="{{ route('purchase-orders.show', $purchaseBill->purchaseOrder) }}">{{ $purchaseBill->purchaseOrder->po_number }}</a>@else{{ $purchaseBill->purchaseOrder->po_number }}@endcan @if($exceptionDisplay)<span class="status-badge {{ $exceptionDisplay['tone'] }}">{{ $exceptionDisplay['detail_label'] }}</span>@endif</p>
+            @if($purchaseBill->po_exception_reason)
+                <div class="alert alert-warning">
+                    <strong>Exceeds purchase order - documented exception:</strong> {{ $purchaseBill->po_exception_reason }}
+                    @if($exceptionDisplay && $exceptionDisplay['is_pending'])
+                        <span class="d-block">Approval requires a user authorized for PO billing exceptions.</span>
+                    @endif
+                </div>
+            @endif
         @endif
         @if($purchaseBill->journalEntry)
             <p><strong>{{ $purchaseBill->status->value === 'reversed' ? 'Original journal:' : 'Journal:' }}</strong> @can('journals.view')<a href="{{ route('journals.show', $purchaseBill->journalEntry) }}">{{ $purchaseBill->journalEntry->voucher_number }}</a>@else{{ $purchaseBill->journalEntry->voucher_number }}@endcan</p>
@@ -22,7 +31,7 @@
         @error('transaction_date')<div class="alert alert-danger">{{ $message }}</div>@enderror
         <div class="table-responsive"><table class="table"><thead><tr><th>Account</th><th>Description</th><th class="text-end">Qty</th><th class="text-end">Unit</th><th class="text-end">Total</th></tr></thead><tbody>
         @foreach($purchaseBill->lines as $line)<tr><td>{{ $line->account->code }} - {{ $line->account->name }}</td><td>{{ $line->description }}</td><td class="text-end">{{ $line->quantity }}</td><td class="text-end">{{ number_format((float) $line->unit_amount, 2) }}</td><td class="text-end">{{ number_format((float) $line->line_total, 2) }}</td></tr>@endforeach
-        </tbody><tfoot><tr><th colspan="4" class="text-end">{{ in_array($purchaseBill->status->value, ['reversed', 'cancelled'], true) ? 'Original Bill Total' : 'Total' }}</th><th class="text-end">PKR {{ number_format((float) $purchaseBill->total_amount, 2) }}</th></tr><tr><th colspan="4" class="text-end">Outstanding</th><th class="text-end" data-outstanding>PKR {{ number_format((float) $purchaseBill->outstandingAmount(), 2) }}@if($purchaseBill->status->value === 'reversed') (Reversed)@elseif($purchaseBill->status->value === 'cancelled') (Cancelled)@endif</th></tr></tfoot></table></div>
+        </tbody><tfoot><tr><th colspan="4" class="text-end">{{ in_array($purchaseBill->status->value, ['reversed', 'cancelled', 'rejected'], true) ? 'Original Bill Total' : 'Total' }}</th><th class="text-end">PKR {{ number_format((float) $purchaseBill->total_amount, 2) }}</th></tr><tr><th colspan="4" class="text-end">{{ in_array($purchaseBill->status->value, ['reversed', 'cancelled', 'rejected'], true) ? 'Active Payable' : 'Outstanding' }}</th><th class="text-end" data-outstanding>PKR {{ number_format((float) $purchaseBill->outstandingAmount(), 2) }}@if($purchaseBill->status->value === 'reversed') (Reversed)@elseif($purchaseBill->status->value === 'cancelled') (Cancelled)@elseif($purchaseBill->status->value === 'rejected') (Rejected — Not Payable)@endif</th></tr></tfoot></table></div>
     </div></div></div>
     <div class="col-lg-4"><div class="card"><div class="card-body"><h2 class="h5">Status: {{ $purchaseBill->status->value }}</h2><div class="d-grid gap-2">
         @if($purchaseBill->status->value === 'draft')
@@ -118,6 +127,16 @@
                     <div class="small mt-2 pt-2 border-top">
                         <strong>Reason:</strong> {{ $cancellation->properties['reason'] ?? 'Not specified' }}<br>
                         <strong>Cancelled by:</strong> {{ $cancellation->actor?->name ?? 'User #'.$cancellation->actor_id }} on {{ $cancellation->created_at->format('d M Y, h:i A') }}
+                    </div>
+                @endif
+            </div>
+        @endif
+        @if($purchaseBill->status->value === 'rejected')
+            <div class="alert alert-secondary mb-0" data-rejected-bill-alert>
+                <strong>This purchase bill was returned for correction.</strong>
+                @if($purchaseBill->rejection_reason)
+                    <div class="small mt-2 pt-2 border-top">
+                        <strong>Reason:</strong> {{ $purchaseBill->rejection_reason }}
                     </div>
                 @endif
             </div>

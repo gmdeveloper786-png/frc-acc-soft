@@ -3,7 +3,15 @@
 @section('page-actions')
 <div class="d-flex gap-2">
     @can('purchase_orders.update') @if($purchaseOrder->status->isEditable())<a class="btn btn-outline-primary" href="{{ route('purchase-orders.edit',$purchaseOrder) }}">Edit draft</a>@endif @endcan
-    @can('purchase_bills.create') @if($purchaseOrder->status->acceptsBills())<a class="btn btn-primary" href="{{ route('purchase-bills.create',['purchase_order'=>$purchaseOrder->id]) }}">Create bill from PO</a>@endif @endcan
+    @can('purchase_bills.create')
+        @if($purchaseOrder->status->acceptsBills())
+            @if($purchaseOrder->isFullyBilled())
+                <button class="btn btn-secondary opacity-75" type="button" disabled title="This purchase order is fully billed. Normal billing is unavailable.">Create bill from PO</button>
+            @else
+                <a class="btn btn-primary" href="{{ route('purchase-bills.create',['purchase_order'=>$purchaseOrder->id]) }}">Create bill from PO</a>
+            @endif
+        @endif
+    @endcan
     <a class="btn btn-outline-primary" href="{{ route('purchase-orders.index') }}">Back</a>
 </div>
 @endsection
@@ -16,15 +24,51 @@
 @endphp
 @foreach(['status','approval','vendor_id','reason'] as $field) @error($field)<div class="alert alert-danger">{{ $message }}</div>@enderror @endforeach
 
+@if($purchaseOrder->isFullyBilled())
+    <div class="alert alert-info d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4" data-fully-billed-notice>
+        <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <span class="status-badge success">Fully Billed</span>
+                <strong>This purchase order has been fully billed.</strong>
+            </div>
+            <div class="small text-muted">Remaining quantity is 0 and remaining balance is {{ $currency }} 0.00. Normal bill creation is disabled to prevent duplicate billing.</div>
+        </div>
+        @can('purchase_bills.create')
+            @if($purchaseOrder->status->acceptsBills())
+                <a class="btn btn-sm btn-outline-warning text-nowrap" href="{{ route('purchase-bills.create', ['purchase_order' => $purchaseOrder->id, 'exception' => 1]) }}" title="Create an overbilling bill with mandatory exception justification">
+                    Request billing exception
+                </a>
+            @endif
+        @endcan
+    </div>
+@endif
+
+@if($status === \App\Enums\PurchaseOrderStatus::Cancelled)
+    <div class="alert alert-danger d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4" data-cancelled-po-notice>
+        <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <span class="status-badge danger">Cancelled</span>
+                <strong>This purchase order has been cancelled.</strong>
+            </div>
+            <div class="small">Available for billing is {{ $currency }} 0.00. Historical unbilled amount at cancellation was {{ $currency }} {{ number_format((float)$purchaseOrder->remainingAmount(),2) }} (not currently billable).</div>
+        </div>
+    </div>
+@endif
+
 <div class="kpi-grid">
     <x-kpi-card label="Order total" value="{{ $currency }} {{ number_format((float)$purchaseOrder->total_amount,2) }}" icon="Σ" tone="navy" status="{{ $status->label() }}" description="Subtotal {{ number_format((float)$purchaseOrder->subtotal,2) }} · discount {{ number_format((float)$purchaseOrder->discount_total,2) }} · tax {{ number_format((float)$purchaseOrder->tax_total,2) }}"/>
     <x-kpi-card label="Billed" value="{{ $currency }} {{ number_format((float)$purchaseOrder->billedAmount(),2) }}" icon="B" tone="teal" status="Linked bills" description="Rejected and reversed bills are not counted"/>
-    <x-kpi-card label="Remaining" value="{{ $currency }} {{ number_format((float)$purchaseOrder->remainingAmount(),2) }}" icon="R" tone="amber" status="Unbilled" description="Order total less billed value"/>
-    <x-kpi-card label="Approval level" value="{{ $approvalTier==='director' ? 'Director' : 'Standard' }}" icon="A" tone="rose" status="From settings" description="{{ $approvalTier==='director' ? 'Above the configured PO threshold' : 'At or below the configured PO threshold' }}"/>
+    @if($status === \App\Enums\PurchaseOrderStatus::Cancelled)
+        <x-kpi-card label="Available for Billing" value="{{ $currency }} 0.00" icon="0" tone="rose" status="Cancelled" description="Cancelled order — billing authority revoked"/>
+        <x-kpi-card label="Unbilled at Cancellation" value="{{ $currency }} {{ number_format((float)$purchaseOrder->remainingAmount(),2) }}" icon="H" tone="neutral" status="Historical" description="Historical unbilled balance preserved for audit history"/>
+    @else
+        <x-kpi-card label="Remaining" value="{{ $currency }} {{ number_format((float)$purchaseOrder->remainingAmount(),2) }}" icon="R" tone="{{ $purchaseOrder->isFullyBilled() ? 'teal' : 'amber' }}" status="{{ $purchaseOrder->isFullyBilled() ? 'Fully Billed' : 'Unbilled' }}" description="{{ $purchaseOrder->isFullyBilled() ? 'Fully billed — no remaining order balance' : 'Order total less billed value' }}"/>
+        <x-kpi-card label="Approval level" value="{{ $approvalTier==='director' ? 'Director' : 'Standard' }}" icon="A" tone="rose" status="From settings" description="{{ $approvalTier==='director' ? 'Above the configured PO threshold' : 'At or below the configured PO threshold' }}"/>
+    @endif
 </div>
 
 <section class="surface-card mb-4">
-    <div class="card-heading"><div><span class="section-kicker">Procurement commitment — no General Ledger posting</span><h2>Order details</h2></div><span class="status-badge {{ $status->badge() }}">{{ $status->label() }}</span></div>
+    <div class="card-heading"><div><span class="section-kicker">Procurement commitment — no General Ledger posting</span><h2>Order details</h2></div><div class="d-flex gap-2"><span class="status-badge {{ $status->badge() }}">{{ $status->label() }}</span>@if($purchaseOrder->isFullyBilled())<span class="status-badge success">Fully Billed</span>@endif</div></div>
     <div class="row g-3">
         <div class="col-md-3"><small>PO date</small><strong class="d-block">{{ $purchaseOrder->po_date->format('d M Y') }}</strong></div>
         <div class="col-md-3"><small>Expected delivery</small><strong class="d-block">{{ $purchaseOrder->expected_delivery_date?->format('d M Y') ?? '—' }}</strong></div>
@@ -40,20 +84,39 @@
 
 <section class="surface-card mb-4">
     <div class="card-heading"><div><span class="section-kicker">Quantities and values</span><h2>Order lines and billing reconciliation</h2></div></div>
-    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>#</th><th>Item / description</th><th class="text-end">Qty</th><th>Unit</th><th class="text-end">Unit price</th><th class="text-end">Discount</th><th class="text-end">Tax</th><th class="text-end">Line total</th><th class="text-end">Billed qty</th><th class="text-end">Remaining qty</th></tr></thead><tbody>
+    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>#</th><th>Item / description</th><th class="text-end">Qty</th><th>Unit</th><th class="text-end">Unit price</th><th class="text-end">Discount</th><th class="text-end">Tax</th><th class="text-end">Line total</th><th class="text-end">Billed qty</th><th class="text-end">{{ $status === \App\Enums\PurchaseOrderStatus::Cancelled ? 'Unbilled Qty at Cancellation' : 'Remaining qty' }}</th></tr></thead><tbody>
     @foreach($purchaseOrder->lines as $line)
-        <tr><td>{{ $line->line_number }}</td><td>{{ $line->description }}@if($line->account || $line->service)<span class="table-subtext">{{ $line->account ? $line->account->code.' — '.$line->account->name : '' }}{{ $line->account && $line->service ? ' · ' : '' }}{{ $line->service?->name }}</span>@endif</td><td class="text-end font-monospace">{{ $line->quantity }}</td><td>{{ $line->unit ?: '—' }}</td><td class="text-end font-monospace">{{ number_format((float)$line->unit_price,2) }}</td><td class="text-end font-monospace">{{ number_format((float)$line->discount_amount,2) }}</td><td class="text-end font-monospace">{{ number_format((float)$line->tax_amount,2) }}</td><td class="text-end font-monospace">{{ number_format((float)$line->line_total,2) }}</td><td class="text-end font-monospace">{{ $line->billedQuantity() }}</td><td class="text-end font-monospace">{{ $line->remainingQuantity() }}</td></tr>
+        <tr><td>{{ $line->line_number }}</td><td>{{ $line->description }}@if($line->account || $line->service)<span class="table-subtext">{{ $line->account ? $line->account->code.' — '.$line->account->name : '' }}{{ $line->account && $line->service ? ' · ' : '' }}{{ $line->service?->name }}</span>@endif</td><td class="text-end font-monospace">{{ $line->quantity }}</td><td>{{ $line->unit ?: '—' }}</td><td class="text-end font-monospace">{{ number_format((float)$line->unit_price,2) }}</td><td class="text-end font-monospace">{{ number_format((float)$line->discount_amount,2) }}</td><td class="text-end font-monospace">{{ number_format((float)$line->tax_amount,2) }}</td><td class="text-end font-monospace">{{ number_format((float)$line->line_total,2) }}</td><td class="text-end font-monospace">{{ $line->billedQuantity() }}</td><td class="text-end font-monospace">@if($status === \App\Enums\PurchaseOrderStatus::Cancelled){{ (float)$line->remainingQuantity() }}{{ $line->unit ? ' '.$line->unit : '' }}<span class="table-subtext text-muted d-block">Not currently billable</span>@else{{ $line->remainingQuantity() }}@endif</td></tr>
     @endforeach
     </tbody><tfoot><tr><th colspan="7" class="text-end">Order total</th><th class="text-end font-monospace">{{ $currency }} {{ number_format((float)$purchaseOrder->total_amount,2) }}</th><th colspan="2"></th></tr></tfoot></table></div>
 </section>
 
 <section class="surface-card mb-4">
-    <div class="card-heading"><div><span class="section-kicker">Payables are recognised here, once per bill</span><h2>Linked purchase bills</h2></div><span class="status-badge neutral">{{ $purchaseOrder->bills->count() }} bills</span></div>
+    <div class="card-heading"><div><span class="section-kicker">Payables are recognised here, once per bill</span><h2>Linked purchase bills</h2></div><div class="d-flex gap-2"><span class="status-badge neutral">{{ $purchaseOrder->bills->count() }} bills</span>@if($purchaseOrder->isFullyBilled())<span class="status-badge success">Fully Billed</span>@endif</div></div>
     <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Bill number</th><th>Invoice date</th><th>Status</th><th>PO exception</th><th class="text-end">Bill total</th><th></th></tr></thead><tbody>
     @forelse($purchaseOrder->bills as $bill)
-        <tr><td><code>{{ $bill->bill_number }}</code></td><td>{{ $bill->invoice_date->format('d M Y') }}</td><td><span class="status-badge neutral">{{ ucfirst($bill->status->value) }}</span></td><td>@if($bill->po_exception_status)<span class="status-badge {{ $bill->po_exception_status==='approved'?'success':'pending' }}">Exception {{ $bill->po_exception_status }}</span><span class="table-subtext">{{ $bill->po_exception_reason }}</span>@else Within PO @endif</td><td class="text-end font-monospace">{{ number_format((float)$bill->total_amount,2) }}</td><td>@can('purchase_bills.view')<a class="btn btn-sm btn-outline-primary" href="{{ route('purchase-bills.show',$bill) }}">View</a>@endcan</td></tr>
+        @php($exceptionDisplay = $bill->poExceptionDisplay())
+        <tr>
+            <td><code>{{ $bill->bill_number }}</code></td>
+            <td>{{ $bill->invoice_date->format('d M Y') }}</td>
+            <td><span class="status-badge neutral">{{ ucfirst($bill->status->value) }}</span></td>
+            <td>
+                @if($exceptionDisplay)
+                    <span class="status-badge {{ $exceptionDisplay['tone'] }}">{{ $exceptionDisplay['label'] }}</span>
+                    <span class="table-subtext">{{ $bill->po_exception_reason }}</span>
+                @else
+                    Within PO
+                @endif
+            </td>
+            <td class="text-end font-monospace">{{ number_format((float)$bill->total_amount,2) }}</td>
+            <td>@can('purchase_bills.view')<a class="btn btn-sm btn-outline-primary" href="{{ route('purchase-bills.show',$bill) }}">View</a>@endcan</td>
+        </tr>
     @empty
-        <tr><td colspan="6"><x-empty-state title="No bills linked yet" description="Bills can reference this order once it is approved. Receiving goods and billing are separate events from approval." /></td></tr>
+        @if($status === \App\Enums\PurchaseOrderStatus::Cancelled)
+            <tr><td colspan="6"><x-empty-state title="No bills linked" description="No purchase bills were created before cancellation. Billing is unavailable for cancelled purchase orders." /></td></tr>
+        @else
+            <tr><td colspan="6"><x-empty-state title="No bills linked yet" description="Bills can reference this order once it is approved. Receiving goods and billing are separate events from approval." /></td></tr>
+        @endif
     @endforelse
     </tbody></table></div>
 </section>

@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use LogicException;
 
-#[Fillable(['branch_id', 'accounting_period_id', 'status', 'active_key', 'source', 'gross_amount', 'total_deductions', 'net_amount', 'journal_entry_id', 'created_by', 'validated_by', 'submitted_by', 'approved_by', 'posted_by', 'reversed_by', 'validated_at', 'submitted_at', 'approved_at', 'posted_at', 'paid_at', 'reversed_at', 'rejection_reason', 'reversal_reason'])]
+#[Fillable(['branch_id', 'accounting_period_id', 'fund_id', 'status', 'active_key', 'source', 'gross_amount', 'total_deductions', 'net_amount', 'journal_entry_id', 'created_by', 'validated_by', 'submitted_by', 'approved_by', 'posted_by', 'reversed_by', 'validated_at', 'submitted_at', 'approved_at', 'posted_at', 'paid_at', 'reversed_at', 'rejection_reason', 'reversal_reason'])]
 class PayrollRun extends Model
 {
     /** @use HasFactory<PayrollRunFactory> */
@@ -58,6 +58,11 @@ class PayrollRun extends Model
     public function period(): BelongsTo
     {
         return $this->belongsTo(AccountingPeriod::class, 'accounting_period_id');
+    }
+
+    public function fund(): BelongsTo
+    {
+        return $this->belongsTo(Fund::class);
     }
 
     public function lines(): HasMany

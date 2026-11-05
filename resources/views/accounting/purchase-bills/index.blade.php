@@ -62,6 +62,8 @@
                                         <small class="text-muted">(Reversed)</small>
                                     @elseif ($bill->status === \App\Enums\PurchaseBillStatus::Cancelled)
                                         <small class="text-muted">(Cancelled)</small>
+                                    @elseif ($bill->status === \App\Enums\PurchaseBillStatus::Rejected)
+                                        <small class="text-muted">(Rejected)</small>
                                     @endif
                                 </td>
                                 <td class="text-nowrap">

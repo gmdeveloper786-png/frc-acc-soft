@@ -16,7 +16,11 @@ class ImprestReplenishment extends Model
     /** Statuses of a replenishment whose journal is not yet posted and still counts as open. */
     public const OPEN_STATUSES = ['draft', 'submitted', 'approved', 'rejected'];
 
+    public const POSTED = 'posted';
+
     public const CANCELLED = 'cancelled';
+
+    public const REVERSED = 'reversed';
 
     protected function casts(): array
     {

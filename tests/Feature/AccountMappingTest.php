@@ -181,3 +181,34 @@ test('readiness screen is restricted to the administrator permission', function 
     $this->actingAs($accountant)->get(route('accounting-setup.readiness'))->assertForbidden();
     $this->actingAs($this->admin)->get(route('accounting-setup.readiness'))->assertOk()->assertSee('Not ready for financial posting')->assertSee('Action required');
 });
+
+test('salary expense mapping displays required for payroll posting when unmapped and valid when mapped', function () {
+    // When unmapped, Salary Expense displays Required for payroll posting — not mapped
+    $response = $this->get(route('account-mappings.index'))->assertOk();
+    $response->assertSee('Required for payroll posting — not mapped');
+    $response->assertSee('status-badge danger', false);
+
+    // Other optional mappings still show Optional — not mapped
+    expect(AccountMappingKey::DefaultExpense->unmappedBadgeLabel())->toBe('Optional — not mapped')
+        ->and(AccountMappingKey::DefaultExpense->unmappedBadgeTone())->toBe('neutral')
+        ->and(AccountMappingKey::PurchaseBillControl->unmappedBadgeLabel())->toBe('Optional — not mapped')
+        ->and(AccountMappingKey::PurchaseBillControl->unmappedBadgeTone())->toBe('neutral')
+        ->and(AccountMappingKey::SalaryExpense->unmappedBadgeLabel())->toBe('Required for payroll posting — not mapped')
+        ->and(AccountMappingKey::SalaryExpense->unmappedBadgeTone())->toBe('danger')
+        ->and(AccountMappingKey::SalaryExpense->isRequired())->toBeFalse()
+        ->and(AccountMappingKey::SalaryExpense->isRequiredOrConditional())->toBeTrue();
+
+    // Missing Salary Expense blocks resolution with clear configuration error
+    expect(fn () => app(AccountMappingService::class)->resolve(AccountMappingKey::SalaryExpense))
+        ->toThrow(ValidationException::class, 'Configuration error: the Salary Expense GL mapping is not configured');
+
+    // Map Salary Expense to a valid expense account
+    $salaryExpense = Account::factory()->create(['account_type' => 'expense', 'financial_statement' => 'income_expenditure']);
+    app(AccountMappingService::class)->set(AccountMappingKey::SalaryExpense, $salaryExpense->id, $this->admin);
+
+    // Verify it now displays Valid
+    $this->get(route('account-mappings.index'))
+        ->assertOk()
+        ->assertSee($salaryExpense->code)
+        ->assertSee('Valid');
+});

@@ -6,6 +6,7 @@
     $currency = $appSettings['currency_code'];
     $user = auth()->user();
     $reconciled = $figures['difference']->isZero();
+    $canSubmit = $reconciled && $figures['unrecorded']->isEmpty();
     $candidatesByAmount = $bookCandidates->groupBy(fn ($line) => \App\Services\AccountingDecimal::string($bookAmount($line)));
 @endphp
 @section('title','Bank Reconciliation — '.$account->name) @section('eyebrow','Bank reconciliation') @section('page-title',$account->name.' — '.$reconciliation->statement_date->format('d M Y'))
@@ -43,6 +44,8 @@
         <div class="alert alert-warning mb-0">The difference must be exactly 0.00 before the reconciliation can be submitted.
             @if($figures['unrecorded']->isNotEmpty()) Statement items not in the books total {{ $amount($figures['unrecorded_total']) }}: record them through the normal receipt or payment workflow, then match them here. Nothing is posted automatically.@endif
         </div>
+    @elseif($figures['unrecorded']->isNotEmpty())
+        <div class="alert alert-warning mb-0">Every statement item must be matched to a book entry or marked as ignored before the reconciliation can be submitted. ({{ $figures['unrecorded']->count() }} statement item(s) remaining).</div>
     @endif
     @if($figures['reversal_pairs']->isNotEmpty())<p class="card-copy">{{ $figures['reversal_pairs']->count() }} book lines are not listed because a journal and its reversal, both unmatched, cancel each other out.</p>@endif
     <div class="row g-3 mt-1">
@@ -55,7 +58,7 @@
     </div>
     <div class="form-actions">
         @if($editable)
-            <form method="POST" action="{{ route('bank-reconciliations.submit', $reconciliation) }}" data-submit-once>@csrf<button class="btn btn-primary" @disabled(! $reconciled)>Submit for approval</button></form>
+            <form method="POST" action="{{ route('bank-reconciliations.submit', $reconciliation) }}" data-submit-once>@csrf<button class="btn btn-primary" @disabled(! $canSubmit)>Submit for approval</button></form>
             <details class="mt-2">
                 <summary class="btn btn-outline-danger btn-sm">Cancel draft</summary>
                 <form method="POST" action="{{ route('bank-reconciliations.cancel', $reconciliation) }}" class="mt-2" data-submit-once>
@@ -110,7 +113,7 @@
 
 <section class="surface-card mb-4">
     <div class="card-heading"><div><span class="section-kicker">Bank charges, profit, direct credits — record them through receipts or payments; nothing is posted from here</span><h2>Statement items not in the books</h2></div><span class="status-badge {{ $figures['unrecorded']->isEmpty() ? 'success' : 'pending' }}">{{ $figures['unrecorded']->count() }}</span></div>
-    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Date</th><th>Description</th><th>Reference</th><th class="text-end">Amount</th>@if($editable)<th>Match to a book entry</th><th></th>@endif</tr></thead><tbody>
+    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Date</th><th>Description</th><th>Reference</th><th class="text-end">Amount</th>@if($editable)<th>Match to a book entry</th><th>Ignore with reason</th>@endif</tr></thead><tbody>
     @forelse($figures['unrecorded'] as $line)
         <tr>
             <td>{{ $line->transaction_date->format('d M Y') }}</td>
@@ -125,7 +128,7 @@
                         <select class="form-select form-select-sm" name="journal_line_id" aria-label="Book entry">@foreach($options as $option)<option value="{{ $option->id }}">{{ $option->journalEntry->transaction_date->format('d M Y') }} — {{ $option->journalEntry->voucher_number }} — {{ \Illuminate\Support\Str::limit($option->description ?: $option->journalEntry->narration, 40) }}</option>@endforeach</select>
                         <button class="btn btn-sm btn-primary">Match</button>
                     </form>@endif</td>
-                <td><form method="POST" action="{{ route('bank-reconciliations.lines.ignore', [$reconciliation, $line]) }}" data-submit-once>@csrf<button class="btn btn-sm btn-outline-danger" data-confirm="Ignore this statement line? It stays visible under ignored lines.">Ignore</button></form></td>
+                <td><form method="POST" action="{{ route('bank-reconciliations.lines.ignore', [$reconciliation, $line]) }}" class="d-flex gap-2" data-submit-once>@csrf<input class="form-control form-control-sm" name="reason" placeholder="Reason for ignoring (required, min 5 chars)" aria-label="Reason for ignoring" required minlength="5" maxlength="500" style="min-width: 200px;"><button class="btn btn-sm btn-outline-danger" data-confirm="Ignore this statement line? It stays visible under ignored lines.">Ignore</button></form></td>
             @endif
         </tr>
     @empty
@@ -181,11 +184,11 @@
 @if($figures['ignored']->isNotEmpty())
 <section class="surface-card">
     <div class="card-heading"><div><span class="section-kicker">Set aside in this reconciliation; they do not change the figures</span><h2>Ignored statement lines</h2></div></div>
-    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Date</th><th>Description</th><th class="text-end">Amount</th>@if($editable)<th></th>@endif</tr></thead><tbody>
+    <div class="table-responsive"><table class="table accounting-table"><thead><tr><th>Date</th><th>Description</th><th>Reference</th><th class="text-end">Amount</th>@if($editable)<th></th>@endif</tr></thead><tbody>
     @foreach($figures['ignored'] as $line)
         <tr>
-            <td>{{ $line->transaction_date->format('d M Y') }}</td><td>{{ $line->description }}</td><td class="text-end font-monospace">{{ $amount($line->amount) }}</td>
-            @if($editable)<td><form method="POST" action="{{ route('bank-reconciliations.lines.restore', [$reconciliation, $line]) }}" data-submit-once>@csrf<button class="btn btn-sm btn-outline-primary">Restore</button></form></td>@endif
+            <td>{{ $line->transaction_date->format('d M Y') }}</td><td>{{ $line->description }}</td><td>{{ $line->reference ?? '—' }}</td><td class="text-end font-monospace">{{ $amount($line->amount) }}</td>
+            @if($editable)<td><form method="POST" action="{{ route('bank-reconciliations.lines.restore', [$reconciliation, $line]) }}" data-submit-once>@csrf<button class="btn btn-sm btn-outline-primary" data-confirm="Restore this statement line to unrecorded items?">Restore</button></form></td>@endif
         </tr>
     @endforeach
     </tbody></table></div>

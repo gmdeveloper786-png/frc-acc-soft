@@ -613,7 +613,7 @@ class PayrollReportService
         foreach ($run->payments as $payment) {
             /** @var PayrollRunPayment $payment */
             $status = $payment->transaction->status;
-            if (in_array($status, [OperationalTransactionStatus::Rejected, OperationalTransactionStatus::Reversed], true)) {
+            if (in_array($status, [OperationalTransactionStatus::Rejected, OperationalTransactionStatus::Reversed, OperationalTransactionStatus::Cancelled], true)) {
                 continue;
             }
             $amount = AccountingDecimal::of($payment->transaction->amount);

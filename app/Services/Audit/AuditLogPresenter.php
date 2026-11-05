@@ -18,7 +18,7 @@ class AuditLogPresenter
     public const RESTRICTED = '[restricted]';
 
     /** Keys whose values are never displayed, whoever is looking. */
-    private const SECRET_KEYS = ['password', 'token', 'secret', 'app_key', 'remember', 'authorization', 'bank', 'account_number', 'cnic'];
+    private const SECRET_KEYS = ['password', 'token', 'secret', 'app_key', 'remember', 'authorization', 'bank_details', 'iban', 'account_number', 'cnic'];
 
     private const MONEY_KEY = '/amount|salary|salaries|gross|net|total|pay|basic|allowance|deduction|earning|tax|bonus|loan|advance|rate|wage|balance|cost|value|stated/i';
 

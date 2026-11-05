@@ -2,8 +2,11 @@
 
 namespace App\Services;
 
+use App\Enums\AccountType;
 use App\Enums\JournalStatus;
+use App\Models\Account;
 use App\Models\Branch;
+use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\User;
 use App\Services\Funds\FundRestrictionPolicy;
@@ -206,6 +209,27 @@ class JournalWorkflowService
     /** @param list<array<string,mixed>> $lines */
     private function replaceLines(JournalEntry $journal, array $lines): void
     {
+        $accountIds = collect($lines)->pluck('account_id')->filter()->unique()->all();
+        $accounts = Account::query()->whereKey($accountIds)->get(['id', 'account_type'])->keyBy('id');
+        $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+
+        $processedLines = [];
+        foreach (array_values($lines) as $index => $line) {
+            $lineDebit = AccountingDecimal::of($line['debit'] ?? 0);
+            $accountId = $line['account_id'] ?? null;
+            $account = $accountId ? $accounts->get($accountId) : null;
+            $fundId = $line['fund_id'] ?? null;
+
+            // Option B: Auto-default eligible unrestricted operating expense debits without an explicit fund to GEN
+            if (blank($fundId) && $account && $account->account_type === AccountType::Expense && $lineDebit->isPositive() && $genFund) {
+                $fundId = $genFund->id;
+            }
+
+            $line['fund_id'] = $fundId;
+            $processedLines[$index] = $line;
+        }
+        $lines = $processedLines;
+
         // Restricted-fund rule (always enforced; posting checks it again).
         $this->fundRules->check(array_values($lines), fn (int|string $index): string => "lines.{$index}.account_id");
         $this->assertWithinMaximum(array_values($lines));

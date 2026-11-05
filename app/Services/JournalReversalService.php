@@ -6,8 +6,11 @@ use App\Enums\JournalStatus;
 use App\Models\AccountingPeriod;
 use App\Models\BankReconciliation;
 use App\Models\BankReconciliationMatch;
+use App\Models\ImprestFloat;
+use App\Models\ImprestReplenishment;
 use App\Models\JournalEntry;
 use App\Models\User;
+use App\Services\PettyCash\ImprestLedgerService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -73,6 +76,7 @@ class JournalReversalService
             }
             $this->assertDateNotBefore($original, $reversal->transaction_date->toDateString());
             $this->assertNotReconciled($original);
+            $this->assertReplenishmentBalanceSafety($original);
             $this->validator->validate($reversal);
             $basis = $this->authority->journalApprovalBasis($actor, $original->branch, $original->total_debit);
             if ($basis === null) {
@@ -104,6 +108,7 @@ class JournalReversalService
             }
             $this->assertDateNotBefore($original, $reversal->transaction_date->toDateString());
             $this->assertNotReconciled($original);
+            $this->assertReplenishmentBalanceSafety($original);
             $approver = User::query()->find($reversal->approved_by);
             if (! $approver || $this->approvalSeparationError($reversal, $original, $approver) || $this->authority->journalApprovalBasis($approver, $original->branch, $original->total_debit) === null) {
                 throw ValidationException::withMessages(['approval' => 'The approval is no longer valid. Return the reversal so an eligible approver can approve it again.']);
@@ -111,6 +116,7 @@ class JournalReversalService
 
             $posted = $this->posting->postSystem($reversal, $actor);
             $original->update(['status' => JournalStatus::Reversed, 'reversed_by' => $actor->id, 'reversed_at' => now(), 'reversal_reason' => $reversal->reversal_reason]);
+            ImprestReplenishment::query()->where('journal_entry_id', $original->id)->update(['status' => ImprestReplenishment::REVERSED]);
             $this->audit->log('journal.reversed', $original, $this->context($original, $posted, [
                 'reason' => $reversal->reversal_reason, 'voucher_number' => $posted->voucher_number,
                 'requested_by' => $reversal->created_by, 'approved_by' => $reversal->approved_by, 'posted_by' => $actor->id,
@@ -199,8 +205,52 @@ class JournalReversalService
             $original->source_type === YearEndClosingService::SOURCE_TYPE => 'Year-end closing journals have no reversal workflow yet. They stay protected until a dedicated reopening procedure is approved.',
             filled($original->source_type) => 'This journal was posted by a source document. Reverse that document through its own workflow instead.',
             $original->reversal()->exists() => 'A reversal of this journal is already pending or posted.',
-            default => $this->reconciliationBlockedReason($original),
+            default => $this->reconciliationBlockedReason($original) ?? $this->replenishmentBlockedReason($original),
         };
+    }
+
+    public function replenishmentBlockedReason(JournalEntry $original): ?string
+    {
+        $replenishment = ImprestReplenishment::query()->where('journal_entry_id', $original->id)->first();
+        if (! $replenishment) {
+            return null;
+        }
+
+        $float = $replenishment->imprestFloat;
+        if (! $float) {
+            return null;
+        }
+
+        $currentBalance = app(ImprestLedgerService::class)->balance($float);
+        $newBalance = $currentBalance->minus(AccountingDecimal::of($replenishment->amount));
+
+        if ($newBalance->isNegative()) {
+            return 'Reversing this replenishment would cause the petty cash balance (PKR '.AccountingDecimal::string($newBalance).') to become negative. Subsequent petty cash expenditures must be reversed first.';
+        }
+
+        return null;
+    }
+
+    private function assertReplenishmentBalanceSafety(JournalEntry $original): void
+    {
+        $replenishment = ImprestReplenishment::query()->where('journal_entry_id', $original->id)->first();
+        if (! $replenishment) {
+            return;
+        }
+
+        $float = ImprestFloat::query()->lockForUpdate()->find($replenishment->imprest_float_id);
+        if (! $float) {
+            return;
+        }
+
+        $currentBalance = app(ImprestLedgerService::class)->balance($float);
+        $newBalance = $currentBalance->minus(AccountingDecimal::of($replenishment->amount));
+
+        if ($newBalance->isNegative()) {
+            throw ValidationException::withMessages([
+                'status' => 'Reversing this replenishment would cause the petty cash balance (PKR '.AccountingDecimal::string($newBalance).') to become negative. Subsequent petty cash expenditures must be reversed first.',
+            ]);
+        }
     }
 
     /**
@@ -246,10 +296,12 @@ class JournalReversalService
                 throw ValidationException::withMessages(['status' => 'This journal is not eligible for another reversal.']);
             }
             $this->assertNotReconciled($original);
+            $this->assertReplenishmentBalanceSafety($original);
             $reversal = $this->build($original, $period, $date, $reason, $actor, JournalStatus::Approved);
 
             $posted = $this->posting->postSystem($reversal, $actor);
             $original->update(['status' => JournalStatus::Reversed, 'reversed_by' => $actor->id, 'reversed_at' => now(), 'reversal_reason' => $reason]);
+            ImprestReplenishment::query()->where('journal_entry_id', $original->id)->update(['status' => ImprestReplenishment::REVERSED]);
             $this->audit->log('journal.reversed', $original, ['reversal_journal_id' => $posted->id, 'reason' => $reason]);
 
             return $posted;

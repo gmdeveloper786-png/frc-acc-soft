@@ -11,4 +11,5 @@ enum OperationalTransactionStatus: string
     case Disbursed = 'disbursed';
     case Posted = 'posted';
     case Reversed = 'reversed';
+    case Cancelled = 'cancelled';
 }

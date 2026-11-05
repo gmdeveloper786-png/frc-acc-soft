@@ -19,12 +19,14 @@ test('donation categories sidebar item is active on its page', function () {
         ->assertSee('href="'.route('donation-categories.index').'" class="sidebar-link active"', false);
 });
 
-test('parameterized operational finance sidebar item activates only its matching type', function () {
-    $response = $this->get(route('transactions.index', 'cash_receipt'))->assertOk();
+test('unified receipts sidebar item is active on its register and legacy receipt pages', function () {
+    $this->get(route('receipts.index'))
+        ->assertOk()
+        ->assertSee('href="'.route('receipts.index').'" class="sidebar-link active"', false);
 
-    $response
-        ->assertSee('href="'.route('transactions.index', 'cash_receipt').'" class="sidebar-link active"', false)
-        ->assertSee('href="'.route('transactions.index', 'bank_receipt').'" class="sidebar-link "', false);
+    $this->get(route('transactions.index', 'cash_receipt'))
+        ->assertOk()
+        ->assertSee('href="'.route('receipts.index').'" class="sidebar-link active"', false);
 });
 
 test('parameterized finance report sidebar item activates only its matching kind', function () {

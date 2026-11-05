@@ -47,14 +47,14 @@ class RolePermissionSeeder extends Seeder
         'Operational Finance' => [
             'purchase_bills.approve_po_exception',
             'financial_accounts.view', 'financial_accounts.manage',
-            'receipts.view', 'receipts.create', 'receipts.post', 'receipts.reverse',
-            'payments.view', 'payments.create', 'payments.update', 'payments.submit', 'payments.approve', 'payments.approve_high_value', 'payments.disburse', 'payments.post', 'payments.reverse',
-            'expenses.view', 'expenses.create', 'expenses.update', 'expenses.submit', 'expenses.approve', 'expenses.disburse', 'expenses.post', 'expenses.reverse',
+            'receipts.view', 'receipts.create', 'receipts.post', 'receipts.reverse', 'receipts.cancel',
+            'payments.view', 'payments.create', 'payments.update', 'payments.submit', 'payments.approve', 'payments.approve_high_value', 'payments.disburse', 'payments.post', 'payments.reverse', 'payments.cancel',
+            'expenses.view', 'expenses.create', 'expenses.update', 'expenses.submit', 'expenses.approve', 'expenses.disburse', 'expenses.post', 'expenses.reverse', 'expenses.cancel',
             'vendors.view', 'vendors.create', 'vendors.update', 'vendors.deactivate',
             'purchase_bills.view', 'purchase_bills.create', 'purchase_bills.update', 'purchase_bills.submit', 'purchase_bills.approve', 'purchase_bills.post', 'purchase_bills.reverse', 'purchase_bills.cancel',
-            'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'vendor_payments.approve', 'vendor_payments.approve_high_value', 'vendor_payments.disburse', 'vendor_payments.post', 'vendor_payments.reverse',
-            'petty_cash.view', 'petty_cash.create', 'petty_cash.update', 'petty_cash.submit', 'petty_cash.approve', 'petty_cash.disburse', 'petty_cash.post', 'petty_cash.reverse',
-            'donations.view', 'donations.create', 'donations.post', 'donations.reverse', 'donations.manage_categories',
+            'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'vendor_payments.approve', 'vendor_payments.approve_high_value', 'vendor_payments.disburse', 'vendor_payments.post', 'vendor_payments.reverse', 'vendor_payments.cancel',
+            'petty_cash.view', 'petty_cash.create', 'petty_cash.update', 'petty_cash.submit', 'petty_cash.approve', 'petty_cash.disburse', 'petty_cash.post', 'petty_cash.reverse', 'petty_cash.cancel',
+            'donations.view', 'donations.create', 'donations.post', 'donations.reverse', 'donations.manage_categories', 'donations.cancel',
             'cash_books.view', 'bank_books.view', 'finance_reports.view', 'finance_reports.export',
         ],
         'Purchase Orders' => ['purchase_orders.view', 'purchase_orders.create', 'purchase_orders.approve', 'purchase_orders.update', 'purchase_orders.submit', 'purchase_orders.approve_high_value', 'purchase_orders.reject', 'purchase_orders.issue', 'purchase_orders.close', 'purchase_orders.cancel', 'purchase_orders.view_history', 'approval_delegations.manage'],
@@ -96,12 +96,12 @@ class RolePermissionSeeder extends Seeder
         ];
 
         $roles[SystemRole::Accountant->value]['permissions'] = array_merge($roles[SystemRole::Accountant->value]['permissions'], [
-            'financial_accounts.view', 'financial_accounts.manage', 'receipts.view', 'receipts.create', 'receipts.post', 'receipts.reverse',
-            'payments.update', 'payments.submit', 'payments.disburse', 'payments.reverse', 'expenses.view', 'expenses.create', 'expenses.update', 'expenses.submit', 'expenses.disburse', 'expenses.post', 'expenses.reverse',
+            'financial_accounts.view', 'financial_accounts.manage', 'receipts.view', 'receipts.create', 'receipts.post', 'receipts.reverse', 'receipts.cancel',
+            'payments.update', 'payments.submit', 'payments.disburse', 'payments.reverse', 'payments.cancel', 'expenses.view', 'expenses.create', 'expenses.update', 'expenses.submit', 'expenses.disburse', 'expenses.post', 'expenses.reverse', 'expenses.cancel',
             'vendors.view', 'vendors.create', 'vendors.update', 'vendors.deactivate', 'purchase_bills.view', 'purchase_bills.create', 'purchase_bills.update', 'purchase_bills.submit', 'purchase_bills.post', 'purchase_bills.reverse', 'purchase_bills.cancel',
-            'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'vendor_payments.disburse', 'vendor_payments.post', 'vendor_payments.reverse',
-            'petty_cash.view', 'petty_cash.create', 'petty_cash.update', 'petty_cash.submit', 'petty_cash.disburse', 'petty_cash.post', 'petty_cash.reverse',
-            'donations.view', 'donations.create', 'donations.post', 'donations.reverse', 'donations.manage_categories', 'cash_books.view', 'bank_books.view', 'finance_reports.view', 'finance_reports.export',
+            'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'vendor_payments.disburse', 'vendor_payments.post', 'vendor_payments.reverse', 'vendor_payments.cancel',
+            'petty_cash.view', 'petty_cash.create', 'petty_cash.update', 'petty_cash.submit', 'petty_cash.disburse', 'petty_cash.post', 'petty_cash.reverse', 'petty_cash.cancel',
+            'donations.view', 'donations.create', 'donations.post', 'donations.reverse', 'donations.manage_categories', 'donations.cancel', 'cash_books.view', 'bank_books.view', 'finance_reports.view', 'finance_reports.export',
         ]);
         $roles[SystemRole::Cashier->value]['permissions'] = array_merge($roles[SystemRole::Cashier->value]['permissions'], ['financial_accounts.view', 'receipts.view', 'receipts.create', 'payments.submit', 'expenses.view', 'expenses.create', 'expenses.submit', 'vendor_payments.view', 'vendor_payments.create', 'vendor_payments.submit', 'petty_cash.view', 'petty_cash.create', 'petty_cash.submit', 'donations.view', 'donations.create']);
         $roles[SystemRole::Approver->value]['permissions'] = array_merge($roles[SystemRole::Approver->value]['permissions'], ['financial_accounts.view', 'receipts.view', 'expenses.view', 'expenses.approve', 'vendors.view', 'purchase_bills.view', 'purchase_bills.approve', 'vendor_payments.view', 'vendor_payments.approve', 'petty_cash.view', 'petty_cash.approve', 'donations.view', 'cash_books.view', 'bank_books.view', 'finance_reports.view']);

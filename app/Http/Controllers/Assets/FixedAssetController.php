@@ -150,7 +150,7 @@ class FixedAssetController extends Controller
             'branches' => $branches,
             'categories' => AssetCategory::query()->where('is_active', true)->orderBy('code')->get(),
             'vendors' => Vendor::query()->where('is_active', true)->orderBy('name')->get(),
-            'bills' => PurchaseBill::query()->with('vendor')->whereIn('branch_id', $branches->pluck('id'))->whereNotIn('status', ['rejected', 'reversed'])->orderByDesc('invoice_date')->limit(200)->get(),
+            'bills' => PurchaseBill::query()->with('vendor')->whereIn('branch_id', $branches->pluck('id'))->whereNotIn('status', ['rejected', 'reversed', 'cancelled'])->orderByDesc('invoice_date')->limit(200)->get(),
             'policyApproved' => $policy->isApproved(), 'threshold' => (string) $policy->capitalizationThreshold(),
         ];
     }

@@ -599,7 +599,7 @@ await runCase(newCase('UAT-07', 'High-value payment requires Director', '150,000
     step(c, 'Fund UAT Cash A: cash receipt 400,000.00 against 31101 UAT Opening Fund, post');
     const rc = await newTransaction(acc, 'cash_receipt', { branch_id: { text: 'UAT Branch A' }, transaction_date: TODAY, amount: '400000', financial_account_id: { text: 'UAT Cash A' }, contra_account_id: { re: '^31101' }, party_name: 'UAT Fund transfer', narration: 'UAT funding of cash for payment tests' });
     check(c, 'Cash receipt draft saved', rc.id > 0, rc.alerts.concat(rc.invalid));
-    await clickTx(acc, 'Post to Journal Engine');
+    await clickTx(acc, 'Post Receipt');
     const rcs = await txState(acc);
     c.evidence.funding = rcs;
     check(c, 'Cash receipt posted (CR voucher)', /posted/.test(rcs.status) && /^CR/.test(rcs.journal), rcs);

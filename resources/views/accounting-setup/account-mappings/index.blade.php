@@ -15,8 +15,7 @@
             <td>
                 @if($control['valid'])<span class="status-badge success">Valid</span>
                 @elseif($control['mapping'])<span class="status-badge danger">Invalid ledger</span>
-                @elseif($control['key']->isRequired())<span class="status-badge danger">Required — not mapped</span>
-                @else<span class="status-badge neutral">Optional — not mapped</span>@endif
+                @else<span class="status-badge {{ $control['key']->unmappedBadgeTone() }}">{{ $control['key']->unmappedBadgeLabel() }}</span>@endif
             </td>
             @can('account_mappings.manage')
             <td><form class="d-flex gap-2" method="POST" action="{{ route('account-mappings.update',$control['key']->value) }}">@csrf @method('PUT')

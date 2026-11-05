@@ -2,12 +2,14 @@
 
 namespace App\Http\Controllers\Accounting;
 
+use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
 use App\Enums\PaymentBehaviour;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreOperationalTransactionRequest;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
+use App\Models\AuditLog;
 use App\Models\DonationCategory;
 use App\Models\FinancialAccount;
 use App\Models\FrcService;
@@ -23,7 +25,9 @@ use App\Services\Payroll\StaffAdvanceService;
 use App\Services\SplitPaymentDetector;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class OperationalTransactionController extends Controller
 {
@@ -67,7 +71,9 @@ class OperationalTransactionController extends Controller
     {
         $data = $request->validated();
         if ($request->hasFile('attachment')) {
-            $data['attachment_path'] = $request->file('attachment')->store('operational-finance', 'local');
+            $file = $request->file('attachment');
+            $data['attachment_path'] = $file->store('operational-finance', 'local');
+            $data['attachment_original_name'] = str($file->getClientOriginalName())->limit(250, '')->toString();
         }
         $transaction = $service->create($data, $request->user());
 
@@ -77,7 +83,7 @@ class OperationalTransactionController extends Controller
     public function show(Request $request, OperationalTransaction $transaction, BranchAccess $access, OperationalTransactionService $service): View
     {
         abort_unless($request->user()->can($transaction->type->permissionPrefix().'.view') && $access->canAccess($request->user(), $transaction->branch), 403);
-        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory', 'purchaseBill.payableAccount', 'payableObligation.sourceExpense', 'accruedPayableObligation', 'journalEntry', 'creator', 'approver']);
+        $transaction->load(['branch', 'financialAccount.account', 'contraAccount', 'payableAccount', 'vendor', 'service', 'fund', 'donationCategory.incomeAccount', 'purchaseBill.payableAccount', 'payableObligation.sourceExpense', 'accruedPayableObligation', 'journalEntry', 'creator', 'approver']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
         $defaultReversalDate = today()->toDateString();
         $defaultReversalPeriodId = $openPeriods->first(fn (AccountingPeriod $period): bool => $defaultReversalDate >= $period->start_date->toDateString() && $defaultReversalDate <= $period->end_date->toDateString())?->id;
@@ -86,7 +92,9 @@ class OperationalTransactionController extends Controller
 
         $canReject = $service->canReject($transaction, $request->user());
         $canPost = $service->canPost($transaction, $request->user());
+        $canCancelDraft = $service->canCancelDraft($transaction, $request->user());
         $hasActivePayableSettlements = $service->hasActivePayableSettlementsForSource($transaction);
+        $pettyCashReversalBlockedReason = $service->pettyCashReversalBlockedReason($transaction);
 
         $splitWarning = app(SplitPaymentDetector::class)->analyze($transaction);
         // The staff advance a payment was raised for; the advance records this payment as its disbursement when it is posted.
@@ -94,7 +102,38 @@ class OperationalTransactionController extends Controller
         $linkedAdvance = $advanceId ? StaffAdvance::query()->with('branch')->find($advanceId, ['id', 'reference', 'branch_id']) : null;
         $canOpenAdvance = $linkedAdvance && $request->user()->can('staff_advances.view') && $access->canAccess($request->user(), $linkedAdvance->branch);
 
-        return view('accounting.transactions.show', compact('transaction', 'openPeriods', 'defaultReversalDate', 'defaultReversalPeriodId', 'canApprove', 'canReject', 'canPost', 'splitWarning', 'hasActivePayableSettlements', 'linkedAdvance', 'canOpenAdvance'));
+        $cancellation = $transaction->status === OperationalTransactionStatus::Cancelled
+            ? AuditLog::query()
+                ->where('auditable_type', $transaction->getMorphClass())
+                ->where('auditable_id', $transaction->id)
+                ->where('event', $transaction->type->permissionPrefix().'.cancelled')
+                ->with('actor')
+                ->latest('id')
+                ->first()
+            : null;
+
+        $attachment = null;
+        if ($transaction->attachment_path) {
+            $exists = Storage::disk('local')->exists($transaction->attachment_path);
+            $extension = strtoupper(pathinfo($transaction->attachment_path, PATHINFO_EXTENSION) ?: 'FILE');
+            $hasOriginalName = filled($transaction->attachment_original_name);
+            $displayName = $hasOriginalName
+                ? $transaction->attachment_original_name
+                : "Supporting Document ({$extension})";
+
+            $attachment = [
+                'path' => $transaction->attachment_path,
+                'exists' => $exists,
+                'extension' => $extension,
+                'has_original_name' => $hasOriginalName,
+                'display_name' => $displayName,
+                'size_kb' => $exists ? round(Storage::disk('local')->size($transaction->attachment_path) / 1024, 1) : null,
+            ];
+        }
+
+        $postingBlockedReason = $service->postingBlockedReason($transaction);
+
+        return view('accounting.transactions.show', compact('transaction', 'openPeriods', 'defaultReversalDate', 'defaultReversalPeriodId', 'canApprove', 'canReject', 'canPost', 'canCancelDraft', 'cancellation', 'splitWarning', 'hasActivePayableSettlements', 'pettyCashReversalBlockedReason', 'linkedAdvance', 'canOpenAdvance', 'attachment', 'postingBlockedReason'));
     }
 
     public function submit(Request $request, OperationalTransaction $transaction, OperationalTransactionService $service): RedirectResponse
@@ -129,9 +168,35 @@ class OperationalTransactionController extends Controller
         };
         abort_unless($permission !== null && $transaction->status->value === 'posted', 404);
         abort_unless($request->user()->can($permission) && $access->canAccess($request->user(), $transaction->branch), 403);
-        $transaction->load(['branch', 'financialAccount', 'donationCategory', 'journalEntry']);
+        $transaction->load(['branch', 'financialAccount', 'donationCategory', 'fund.parent', 'journalEntry']);
 
         return view('accounting.transactions.donation-receipt', compact('transaction'));
+    }
+
+    public function attachment(Request $request, OperationalTransaction $transaction, BranchAccess $access): StreamedResponse
+    {
+        abort_unless($request->user()->can($transaction->type->permissionPrefix().'.view') && $access->canAccess($request->user(), $transaction->branch), 403);
+        abort_unless(! empty($transaction->attachment_path) && Storage::disk('local')->exists($transaction->attachment_path), 404, 'Supporting document not found.');
+
+        $extension = strtolower(pathinfo($transaction->attachment_path, PATHINFO_EXTENSION) ?: 'pdf');
+
+        if (filled($transaction->attachment_original_name)) {
+            $cleaned = str($transaction->attachment_original_name)
+                ->basename()
+                ->replaceMatches('/[^A-Za-z0-9._\-]/', '_')
+                ->trim('_')
+                ->toString();
+            $downloadFilename = pathinfo($cleaned, PATHINFO_EXTENSION) === '' ? "{$cleaned}.{$extension}" : $cleaned;
+        } else {
+            $typeSlug = strtolower($transaction->type->value ?: 'transaction');
+            $downloadFilename = "{$typeSlug}-{$transaction->id}-supporting-document.{$extension}";
+        }
+
+        if ($request->boolean('inline')) {
+            return Storage::disk('local')->response($transaction->attachment_path, $downloadFilename);
+        }
+
+        return Storage::disk('local')->download($transaction->attachment_path, $downloadFilename);
     }
 
     public function disburse(Request $request, OperationalTransaction $transaction, OperationalTransactionService $service): RedirectResponse
@@ -156,6 +221,16 @@ class OperationalTransactionController extends Controller
         return back()->with('status', 'Transaction reversed through Journal Engine.');
     }
 
+    public function cancelDraft(Request $request, OperationalTransaction $transaction, OperationalTransactionService $service): RedirectResponse
+    {
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'min:5', 'max:2000'],
+        ]);
+        $service->cancelDraft($transaction, $data['reason'], $request->user());
+
+        return back()->with('status', 'Transaction draft cancelled.');
+    }
+
     private function formData(Request $request, BranchAccess $access): array
     {
         $branchIds = $access->scope($request->user())->pluck('id');
@@ -167,7 +242,7 @@ class OperationalTransactionController extends Controller
             'vendors' => Vendor::query()->where('is_active', true)->orderBy('name')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
             'donationCategories' => DonationCategory::query()->with('fund')->where('is_active', true)->orderBy('name')->get(),
-            'funds' => Fund::query()->active()->orderBy('code')->get(),
+            'funds' => Fund::query()->with('parent')->active()->orderBy('code')->get(),
             'bills' => PurchaseBill::query()->with(['vendor', 'branch', 'postedPayments'])->whereIn('branch_id', $branchIds)->where('status', 'posted')->orderByDesc('invoice_date')->get(),
         ];
     }

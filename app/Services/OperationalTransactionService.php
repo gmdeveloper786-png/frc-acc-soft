@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\AccountMappingKey;
+use App\Enums\AccountType;
 use App\Enums\JournalStatus;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
@@ -18,6 +19,8 @@ use App\Models\Branch;
 use App\Models\DonationCategory;
 use App\Models\FinancialAccount;
 use App\Models\Fund;
+use App\Models\ImprestFloat;
+use App\Models\ImprestReplenishment;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
 use App\Models\PayableObligation;
@@ -34,6 +37,8 @@ use App\Services\PettyCash\ImprestLedgerService;
 use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class OperationalTransactionService
@@ -114,6 +119,12 @@ class OperationalTransactionService
             }
             $this->guardObligation($transaction, $lockedPayableObligation);
             $this->guardTransactionFloat($transaction);
+            if ($transaction->type === OperationalTransactionType::Donation && $transaction->fund_id && $transaction->donation_category_id) {
+                $fund = Fund::query()->find($transaction->fund_id);
+                if ($fund) {
+                    $this->validateDonationFundCompatibility((int) $transaction->donation_category_id, $fund);
+                }
+            }
             $transaction->update(['status' => OperationalTransactionStatus::Submitted, 'submitted_by' => $actor->id, 'submitted_at' => now(), 'rejection_reason' => null]);
             $this->audit->log($prefix.'.submitted', $transaction);
 
@@ -198,6 +209,55 @@ class OperationalTransactionService
         return $this->payableObligations->hasActiveSettlementsForSource($transaction);
     }
 
+    public function pettyCashReversalBlockedReason(OperationalTransaction $transaction, bool $lock = false): ?string
+    {
+        if ($transaction->type !== OperationalTransactionType::PettyCash || $transaction->status !== OperationalTransactionStatus::Posted) {
+            return null;
+        }
+
+        $financial = $transaction->financialAccount ?? ($transaction->financial_account_id ? FinancialAccount::query()->find($transaction->financial_account_id) : null);
+        $float = $financial ? $this->imprest->activeFloatFor($financial, $lock) : null;
+        if (! $float && $financial) {
+            $query = ImprestFloat::query()->where('branch_id', $financial->branch_id)->where('account_id', $financial->account_id)->latest('id');
+            $float = $lock ? $query->lockForUpdate()->first() : $query->first();
+        }
+
+        if (! $float) {
+            return null;
+        }
+
+        $this->imprest->syncStatuses($float);
+
+        $covering = ImprestReplenishment::query()->with('journalEntry')
+            ->where('imprest_float_id', $float->id)
+            ->whereNotIn('status', [ImprestReplenishment::CANCELLED, ImprestReplenishment::REVERSED])
+            ->get()
+            ->first(fn (ImprestReplenishment $rep): bool => in_array((int) $transaction->id, collect($rep->covered_voucher_ids)->map(fn ($id): int => (int) $id)->all(), true));
+
+        if ($covering) {
+            $voucherNumber = $covering->journalEntry?->voucher_number ?? ('#'.$covering->id);
+
+            return "This petty cash voucher is covered by replenishment {$voucherNumber}. The replenishment journal must be reversed before this voucher can be reversed.";
+        }
+
+        $currentBalance = $this->imprest->balance($float);
+        $newBalance = $currentBalance->plus(AccountingDecimal::of($transaction->amount));
+        $floatCeiling = AccountingDecimal::of($float->float_amount);
+        if ($newBalance->isGreaterThan($floatCeiling)) {
+            return 'Reversing this voucher would cause the petty cash balance (PKR '.AccountingDecimal::string($newBalance).') to exceed the authorized imprest float of PKR '.AccountingDecimal::string($floatCeiling).'.';
+        }
+
+        return null;
+    }
+
+    private function guardPettyCashReversal(OperationalTransaction $transaction): void
+    {
+        if ($reason = $this->pettyCashReversalBlockedReason($transaction, true)) {
+            $field = str_contains($reason, 'exceed') ? 'amount' : 'status';
+            throw ValidationException::withMessages([$field => $reason]);
+        }
+    }
+
     /** Approval level for the amount under the threshold configured right now. */
     private function currentTier(OperationalTransaction $transaction): ?string
     {
@@ -244,6 +304,51 @@ class OperationalTransactionService
         }, 3);
     }
 
+    /** Whether the user may cancel this draft transaction now, for the screen. cancelDraft() checks everything again inside its lock. */
+    public function canCancelDraft(OperationalTransaction $transaction, User $actor): bool
+    {
+        $prefix = $transaction->type->permissionPrefix();
+
+        return $transaction->status === OperationalTransactionStatus::Draft
+            && $transaction->journal_entry_id === null
+            && $actor->is_active
+            && $actor->can($prefix.'.cancel')
+            && $this->branchAccess->canAccess($actor, $transaction->branch);
+    }
+
+    public function cancelDraft(OperationalTransaction $transaction, string $reason, User $actor): OperationalTransaction
+    {
+        $prefix = $transaction->type->permissionPrefix();
+        abort_unless($actor->is_active && $actor->can($prefix.'.cancel'), 403);
+
+        $reason = trim($reason);
+        if (mb_strlen($reason) < 5 || mb_strlen($reason) > 2000) {
+            throw ValidationException::withMessages(['reason' => 'Cancellation reason must be between 5 and 2000 characters.']);
+        }
+
+        return DB::transaction(function () use ($transaction, $reason, $actor, $prefix): OperationalTransaction {
+            $transaction = OperationalTransaction::query()->with('branch')->lockForUpdate()->findOrFail($transaction->id);
+            $this->guardBranch($transaction, $actor);
+
+            if ($transaction->status !== OperationalTransactionStatus::Draft || $transaction->journal_entry_id !== null) {
+                throw ValidationException::withMessages(['status' => 'Sirf draft transaction cancel kiya ja sakta hai.']);
+            }
+
+            $fromStatus = $transaction->status;
+            $transaction->update(['status' => OperationalTransactionStatus::Cancelled]);
+
+            $this->audit->log($prefix.'.cancelled', $transaction, [
+                'from_status' => $fromStatus->value,
+                'reason' => $reason,
+                'cancelled_by' => $actor->id,
+                'reference_number' => $transaction->reference_number,
+                'amount' => $transaction->amount,
+            ], $actor);
+
+            return $transaction->refresh();
+        }, 3);
+    }
+
     /**
      * The only status from which a transaction may be posted: disbursed when money
      * leaves cash or bank, approved when only approval is required, otherwise draft.
@@ -262,7 +367,25 @@ class OperationalTransactionService
         return $actor->can($transaction->type->permissionPrefix().'.post')
             && $this->branchAccess->canAccess($actor, $transaction->branch)
             && $transaction->journal_entry_id === null
-            && $transaction->status === $this->postableStatus($transaction);
+            && $transaction->status === $this->postableStatus($transaction)
+            && $this->postingBlockedReason($transaction) === null;
+    }
+
+    public function postingBlockedReason(OperationalTransaction $transaction): ?string
+    {
+        if ($transaction->journal_entry_id !== null || in_array($transaction->status, [OperationalTransactionStatus::Posted, OperationalTransactionStatus::Reversed, OperationalTransactionStatus::Cancelled], true)) {
+            return null;
+        }
+
+        if ($transaction->type === OperationalTransactionType::Donation) {
+            try {
+                $this->guardDonationPosting($transaction);
+            } catch (ValidationException $e) {
+                return collect($e->errors())->flatten()->first();
+            }
+        }
+
+        return null;
     }
 
     public function post(OperationalTransaction $transaction, User $actor): OperationalTransaction
@@ -288,6 +411,20 @@ class OperationalTransactionService
             ], $transaction->branch);
             $this->guardObligation($transaction, $lockedPayableObligation);
             $this->guardTransactionFloat($transaction);
+            if ($transaction->type === OperationalTransactionType::Donation) {
+                $this->guardDonationPosting($transaction);
+            }
+            if (blank($transaction->fund_id) && (
+                in_array($transaction->type, [OperationalTransactionType::Expense, OperationalTransactionType::PettyCash], true)
+                || (in_array($transaction->type, [OperationalTransactionType::CashPayment, OperationalTransactionType::BankPayment], true)
+                    && $transaction->contraAccount?->account_type === AccountType::Expense)
+            )) {
+                $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+                if ($genFund) {
+                    $transaction->update(['fund_id' => $genFund->id]);
+                    $transaction->refresh();
+                }
+            }
             $journal = $this->buildJournal($transaction, $actor);
             $journal = $this->posting->postSystem($journal, $actor);
             $transaction->update(['status' => OperationalTransactionStatus::Posted, 'journal_entry_id' => $journal->id, 'posted_at' => now()]);
@@ -316,7 +453,7 @@ class OperationalTransactionService
         return DB::transaction(function () use ($transaction, $period, $date, $reason, $actor, $prefix): OperationalTransaction {
             $lockedSourceObligation = $this->payableObligations->lockSourceExpense($transaction->id);
             $lockedPayableObligation = $lockedSourceObligation ?? $this->payableObligations->lockSettlement($transaction->payable_obligation_id);
-            $transaction = OperationalTransaction::query()->with(['branch', 'journalEntry'])->lockForUpdate()->findOrFail($transaction->id);
+            $transaction = OperationalTransaction::query()->with(['branch', 'journalEntry', 'financialAccount'])->lockForUpdate()->findOrFail($transaction->id);
             $this->guardBranch($transaction, $actor);
             if ($transaction->status !== OperationalTransactionStatus::Posted || ! $transaction->journalEntry) {
                 throw ValidationException::withMessages(['status' => 'Only a posted transaction can be reversed.']);
@@ -327,6 +464,7 @@ class OperationalTransactionService
             // A payment that paid out a staff advance: refuse before anything changes if recovery has started.
             $advances = app(StaffAdvanceService::class);
             $advance = $advances->lockForPaymentReversal($transaction);
+            $this->guardPettyCashReversal($transaction);
             $this->reversal->reverse($transaction->journalEntry, $period, $date, $reason, $actor);
             $transaction->update(['status' => OperationalTransactionStatus::Reversed]);
             if ($advance) {
@@ -384,11 +522,70 @@ class OperationalTransactionService
             'approved_by' => $transaction->approved_by ?: $actor->id, 'submitted_at' => $transaction->submitted_at ?: now(),
             'approved_at' => $transaction->approved_at ?: now(),
         ]);
-        foreach ([[$debitAccount, $transaction->amount, '0.0000'], [$creditAccount, '0.0000', $transaction->amount]] as $index => [$accountId, $debit, $credit]) {
-            $journal->lines()->create(['line_number' => $index + 1, 'account_id' => $accountId, 'service_id' => $transaction->service_id, 'fund_id' => $transaction->fund_id, 'description' => $transaction->narration, 'debit' => $debit, 'credit' => $credit]);
-        }
+        $creditAccountModel = Account::query()->find($creditAccount);
+        $debitFundId = $transaction->fund_id;
+        $creditFundId = ($creditAccountModel?->account_type === AccountType::Liability || ($transaction->type === OperationalTransactionType::Expense && $transaction->settlement_type === 'accrued'))
+            ? null
+            : $transaction->fund_id;
+
+        $lineDescription = $this->journalLineDescription($transaction);
+        $journal->lines()->create([
+            'line_number' => 1,
+            'account_id' => $debitAccount,
+            'service_id' => $transaction->service_id,
+            'fund_id' => $debitFundId,
+            'description' => $lineDescription,
+            'debit' => $transaction->amount,
+            'credit' => '0.0000',
+        ]);
+        $journal->lines()->create([
+            'line_number' => 2,
+            'account_id' => $creditAccount,
+            'service_id' => $transaction->service_id,
+            'fund_id' => $creditFundId,
+            'description' => $lineDescription,
+            'debit' => '0.0000',
+            'credit' => $transaction->amount,
+        ]);
 
         return $journal;
+    }
+
+    /**
+     * Build a concise, meaningful journal-line description within the 255-character
+     * database limit while preserving transaction references and audit traceability.
+     */
+    private function journalLineDescription(OperationalTransaction $transaction): string
+    {
+        $raw = trim((string) $transaction->narration);
+
+        if (mb_strlen($raw) <= 255 && $raw !== '') {
+            return $raw;
+        }
+
+        if ($raw === '') {
+            $parts = array_filter([
+                $transaction->type->label(),
+                $transaction->party_name,
+                filled($transaction->reference_number) ? 'Ref: '.$transaction->reference_number : null,
+            ]);
+
+            return Str::limit(implode(' - ', $parts), 255, '');
+        }
+
+        $ref = filled($transaction->reference_number) && ! str_contains($raw, $transaction->reference_number)
+            ? ' [Ref: '.$transaction->reference_number.']'
+            : '';
+
+        $ellipsis = '...';
+        $targetBodyLength = 255 - mb_strlen($ref) - mb_strlen($ellipsis);
+        if ($targetBodyLength <= 0) {
+            return mb_substr($ref !== '' ? $ref : $raw, 0, 255);
+        }
+
+        $body = mb_substr($raw, 0, $targetBodyLength);
+
+        return $body.$ellipsis.$ref;
     }
 
     /**
@@ -417,27 +614,143 @@ class OperationalTransactionService
     /**
      * A donation without a chosen fund takes the default fund of its
      * category. The restricted-fund rule is checked on the ledger the
-     * transaction charges; it refuses only when enforcement is on.
+     * transaction charges; it is always enforced.
      *
      * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
+    private function guardDonationPosting(OperationalTransaction $transaction): void
+    {
+        if (! $transaction->donation_category_id) {
+            throw ValidationException::withMessages(['donation_category_id' => 'Active donation category mapping is required before posting.']);
+        }
+
+        $hasAttachment = ! empty($transaction->attachment_path)
+            && Storage::disk('local')->exists($transaction->attachment_path);
+
+        $this->validateDonationFundPolicy(
+            (int) $transaction->donation_category_id,
+            $transaction->fund_id,
+            $hasAttachment,
+            true
+        );
+    }
+
     private function applyFund(OperationalTransactionType $type, array $data, BigDecimal $amount): array
     {
         if ($type === OperationalTransactionType::Donation && blank($data['fund_id'] ?? null) && filled($data['donation_category_id'] ?? null)) {
-            $data['fund_id'] = DonationCategory::query()->whereKey($data['donation_category_id'])->value('fund_id');
+            $category = DonationCategory::query()->find($data['donation_category_id']);
+            $isRestricted = $category && ($category->slug === 'zakat' || $category->slug === 'new-frc-project-donation' || str_contains(strtolower($category->name), 'zakat') || str_contains(strtolower($category->name), 'project'));
+            if (! $isRestricted) {
+                $data['fund_id'] = $category?->fund_id;
+            }
         }
+        if ($type === OperationalTransactionType::Donation && filled($data['donation_category_id'] ?? null)) {
+            $this->validateDonationFundPolicy(
+                (int) $data['donation_category_id'],
+                $data['fund_id'] ?? null,
+                ! empty($data['attachment_path']) || ! empty($data['attachment']),
+                false
+            );
+        }
+
+        $isOperatingExpense = in_array($type, [OperationalTransactionType::Expense, OperationalTransactionType::PettyCash], true)
+            || (in_array($type, [OperationalTransactionType::CashPayment, OperationalTransactionType::BankPayment], true)
+                && filled($data['contra_account_id'] ?? null)
+                && Account::query()->whereKey($data['contra_account_id'])->where('account_type', AccountType::Expense->value)->exists());
+
+        if ($isOperatingExpense && blank($data['fund_id'] ?? null)) {
+            $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+            if ($genFund) {
+                $data['fund_id'] = $genFund->id;
+            }
+        }
+
         if (blank($data['fund_id'] ?? null)) {
             unset($data['fund_id']);
 
             return $data;
         }
-        if (! Fund::query()->whereKey($data['fund_id'])->where('is_active', true)->exists()) {
+        $fund = Fund::query()->whereKey($data['fund_id'])->where('is_active', true)->first();
+        if (! $fund) {
             throw ValidationException::withMessages(['fund_id' => 'The selected fund is not active.']);
         }
         $this->enforceFundRule($type, $data, $amount);
 
         return $data;
+    }
+
+    public function validateDonationFundPolicy(int $donationCategoryId, mixed $fundId, bool $hasAttachment = false, bool $isPosting = false): void
+    {
+        $category = DonationCategory::query()->find($donationCategoryId);
+        if (! $category) {
+            return;
+        }
+
+        $isZakatCategory = $category->slug === 'zakat' || str_contains(strtolower($category->name), 'zakat');
+        $isProjectCategory = $category->slug === 'new-frc-project-donation' || str_contains(strtolower($category->name), 'project');
+        $isGeneralCategory = ! $isZakatCategory && ! $isProjectCategory;
+
+        $fund = filled($fundId) ? Fund::query()->with('parent')->find($fundId) : null;
+
+        // Policy 1: Mandatory ZKT for Zakat
+        if ($isZakatCategory) {
+            if (! $fund || ($fund->code !== 'ZKT' && $fund->category !== Fund::CATEGORY_ZAKAT)) {
+                $msg = $isPosting
+                    ? 'Zakat donations must be allocated to the ZKT (Zakat / Charity) fund before posting.'
+                    : 'Zakat donations must be allocated to the ZKT (Zakat / Charity) fund.';
+                throw ValidationException::withMessages(['fund_id' => $msg]);
+            }
+        }
+
+        // Policy 2: Project-specific child fund under DNR
+        if ($isProjectCategory) {
+            if (! $fund) {
+                $msg = $isPosting
+                    ? 'New FRC Project Donations must be allocated to an active project child fund under DNR before posting.'
+                    : 'New FRC Project Donations must be allocated to an active project child fund under DNR.';
+                throw ValidationException::withMessages(['fund_id' => $msg]);
+            }
+            if (! $fund->is_active) {
+                throw ValidationException::withMessages(['fund_id' => 'The selected project fund is not active.']);
+            }
+            if (! $fund->parent_id || ($fund->parent?->code !== 'DNR' && $fund->parent?->category !== 'donor')) {
+                $msg = $isPosting
+                    ? 'New FRC Project Donations must be allocated to an active project child fund under DNR before posting. Generic parent DNR cannot be used.'
+                    : 'New FRC Project Donations must be allocated to an active project child fund under DNR. Generic parent DNR cannot be used.';
+                throw ValidationException::withMessages(['fund_id' => $msg]);
+            }
+        }
+
+        // Policy 5: Fund Compatibility & Donor restriction evidence
+        if ($fund) {
+            $isZakatFund = $fund->category === Fund::CATEGORY_ZAKAT || $fund->code === 'ZKT';
+            $isGrantFund = $fund->category === Fund::CATEGORY_GRANT || str_starts_with($fund->code, 'GRT');
+            $isDnrOrChild = $fund->code === 'DNR' || $fund->parent?->code === 'DNR' || $fund->category === 'donor' || $fund->parent?->category === 'donor';
+
+            if ($isZakatFund && ! $isZakatCategory) {
+                throw ValidationException::withMessages([
+                    'fund_id' => "Restricted fund {$fund->code} ({$fund->name}) can only receive Zakat donations. It cannot be selected for {$category->name}.",
+                ]);
+            }
+
+            if ($isGrantFund) {
+                throw ValidationException::withMessages([
+                    'fund_id' => "Grant project fund {$fund->code} is reserved for contractual grants. Donations cannot be allocated to grant funds.",
+                ]);
+            }
+
+            if ($isGeneralCategory && $isDnrOrChild && ! $hasAttachment) {
+                throw ValidationException::withMessages([
+                    'attachment' => 'Allocating a General Donation to a donor-restricted fund requires an attached donor-written restriction document.',
+                ]);
+            }
+        }
+    }
+
+    public function validateDonationFundCompatibility(int $donationCategoryId, Fund $fund): void
+    {
+        $this->validateDonationFundPolicy($donationCategoryId, $fund->id, true);
     }
 
     /** @param array<string, mixed> $data */
@@ -524,7 +837,7 @@ class OperationalTransactionService
      */
     private function guardObligation(OperationalTransaction $transaction, ?PayableObligation $lockedPayableObligation = null): void
     {
-        $live = fn ($query) => $query->whereKeyNot($transaction->id)->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value]);
+        $live = fn ($query) => $query->whereKeyNot($transaction->id)->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value, OperationalTransactionStatus::Cancelled->value]);
         $sum = fn ($payments): BigDecimal => $payments->reduce(fn (BigDecimal $carry, OperationalTransaction $payment): BigDecimal => $carry->plus(AccountingDecimal::of($payment->amount)), AccountingDecimal::of($transaction->amount));
 
         if ($transaction->type === OperationalTransactionType::VendorPayment) {

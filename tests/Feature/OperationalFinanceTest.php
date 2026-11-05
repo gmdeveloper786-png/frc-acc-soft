@@ -1,18 +1,22 @@
 <?php
 
 use App\Enums\AccountingPeriodStatus;
+use App\Enums\AccountMappingKey;
 use App\Enums\FiscalYearStatus;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\OperationalTransactionType;
 use App\Enums\SystemRole;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
+use App\Models\AccountMapping;
 use App\Models\AppSetting;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\DonationCategory;
 use App\Models\FinancialAccount;
 use App\Models\FiscalYear;
+use App\Models\Fund;
+use App\Models\OperationalTransaction;
 use App\Models\User;
 use App\Models\Vendor;
 use App\Services\OperationalTransactionService;
@@ -234,4 +238,170 @@ test('a posted cash or bank receipt has a printable receipt limited to its branc
     $otherBranchUser->assignRole(SystemRole::Accountant->value);
     $otherBranchUser->branches()->attach(Branch::factory()->create(['status' => 'publish']));
     $this->actingAs($otherBranchUser)->get(route('transactions.acknowledgment', $posted))->assertForbidden();
+});
+
+test('donation detail displays category and income ledger, allows direct post for authorized user and blocks unauthorized posting', function () {
+    $category = DonationCategory::query()->where('name', 'General Donation')->firstOrFail();
+    $category->update(['income_account_id' => $this->incomeLedger->id]);
+    $fund = Fund::factory()->create(['code' => 'GEN', 'name' => 'General Fund']);
+
+    $data = operationalPayload($this, OperationalTransactionType::Donation, '5000.0000');
+    $data['donation_category_id'] = $category->id;
+    $data['fund_id'] = $fund->id;
+    $data['narration'] = 'General Donation UAT test';
+    unset($data['contra_account_id']);
+
+    $donation = app(OperationalTransactionService::class)->create($data, $this->maker);
+    expect($donation->status->value)->toBe('draft')
+        ->and($donation->journal_entry_id)->toBeNull();
+
+    // 1. Detail screen visibly displays Donation Category, Credit Ledger (Income GL), and Fund
+    $response = $this->actingAs($this->maker)->get(route('transactions.show', $donation))->assertOk();
+    $response->assertSee('Donation Category')
+        ->assertSee('General Donation')
+        ->assertSee('Credit Ledger (Income GL)')
+        ->assertSee($this->incomeLedger->code)
+        ->assertSee($this->incomeLedger->name)
+        ->assertSee('Mapped donation income ledger')
+        ->assertSee('GEN — General Fund')
+        ->assertSee('Post to Journal Engine');
+
+    // 2. Unauthorized user (Cashier holding only donations.create/view) cannot post
+    $cashier = User::factory()->create();
+    $cashier->assignRole(SystemRole::Cashier->value);
+    $cashier->branches()->attach($this->branch);
+
+    $this->actingAs($cashier)->get(route('transactions.show', $donation))->assertOk()
+        ->assertDontSee('Post to Journal Engine');
+    $this->actingAs($cashier)->post(route('transactions.post', $donation))->assertForbidden();
+
+    // 3. Authorized accountant posts directly from Draft, creating one balanced journal
+    $this->actingAs($this->maker)->post(route('transactions.post', $donation))->assertSessionHasNoErrors();
+    $posted = $donation->fresh();
+    expect($posted->status->value)->toBe('posted')
+        ->and($posted->journal_entry_id)->not->toBeNull();
+
+    $journal = $posted->journalEntry;
+    expect($journal->voucherType->code)->toBe('DR')
+        ->and($journal->total_debit)->toBe('5000.0000')
+        ->and($journal->total_credit)->toBe('5000.0000')
+        ->and($journal->lines)->toHaveCount(2);
+
+    $debitLine = $journal->lines->where('debit', '5000.0000')->first();
+    $creditLine = $journal->lines->where('credit', '5000.0000')->first();
+
+    expect($debitLine->account_id)->toBe($this->cash->account_id)
+        ->and($debitLine->fund_id)->toBe($fund->id)
+        ->and($creditLine->account_id)->toBe($this->incomeLedger->id)
+        ->and($creditLine->fund_id)->toBe($fund->id);
+
+    // 4. Acknowledgment view hides workspace header in print media via d-print-none and preserves receipt card
+    $ackResponse = $this->actingAs($this->maker)->get(route('transactions.acknowledgment', $posted))->assertOk();
+    $ackResponse->assertSee('Donation Acknowledgment')
+        ->assertSee('page-header d-print-none', false)
+        ->assertSee('Faizan Rehabilitation Centre')
+        ->assertSee('General Donation')
+        ->assertSee('5,000.00');
+});
+
+test('Step 7B-15A: Expense form preserves attempted contra GL on validation failure and enforces restricted fund permissions', function () {
+    $dnrParent = Fund::factory()->restricted('donor')->create(['code' => 'DNR', 'name' => 'Donor-Restricted Fund']);
+    $dnrUat1 = Fund::factory()->restricted('donor')->create([
+        'code' => 'DNR-UAT1',
+        'name' => 'DEMO UAT Rehabilitation Project',
+        'parent_id' => $dnrParent->id,
+        'is_active' => true,
+    ]);
+
+    $gl52201 = Account::factory()->create([
+        'code' => '52201',
+        'name' => 'Therapy Materials & Consumables',
+        'account_type' => 'expense',
+        'is_postable' => true,
+        'is_active' => true,
+        'purchase_bill_debit_eligible' => true,
+        'direct_payment_eligible' => true,
+    ]);
+    $gl52101 = Account::factory()->create([
+        'code' => '52101',
+        'name' => 'Teaching Materials',
+        'account_type' => 'expense',
+        'is_postable' => true,
+        'is_active' => true,
+        'purchase_bill_debit_eligible' => true,
+        'direct_payment_eligible' => true,
+    ]);
+
+    // Configure permitted accounts on DNR-UAT1: only 52201 is permitted, 52101 is not
+    $dnrUat1->permittedAccounts()->sync([$gl52201->id]);
+
+    // Map AccountsPayable for accrued settlement
+    AccountMapping::query()->updateOrCreate(
+        ['mapping_key' => AccountMappingKey::AccountsPayable->value],
+        ['account_id' => $this->payableLedger->id]
+    );
+
+    // 1. Negative validation test: attempting unpermitted GL 52101 on DNR-UAT1
+    $response = $this->actingAs($this->maker)->post(route('transactions.store'), [
+        'type' => 'expense',
+        'branch_id' => $this->branch->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.00',
+        'settlement_type' => 'accrued',
+        'contra_account_id' => $gl52101->id,
+        'fund_id' => $dnrUat1->id,
+        'reference_number' => 'UAT-EXP-DNR-DENY-001',
+        'narration' => 'Negative validation restricted fund test',
+    ]);
+
+    $response->assertSessionHasErrors([
+        'contra_account_id' => 'Ledger 52101 Teaching Materials is not a permitted charge for restricted fund DNR-UAT1.',
+    ]);
+
+    // 2. Validation redisplay: contra_account_id must preserve attempted GL 52101, display validation error and other form values
+    $redisplay = $this->actingAs($this->maker)
+        ->withSession(['_old_input' => [
+            'type' => 'expense',
+            'branch_id' => $this->branch->id,
+            'transaction_date' => '2026-01-15',
+            'amount' => '100.00',
+            'settlement_type' => 'accrued',
+            'contra_account_id' => (string) $gl52101->id,
+            'fund_id' => (string) $dnrUat1->id,
+            'reference_number' => 'UAT-EXP-DNR-DENY-001',
+            'narration' => 'Negative validation restricted fund test',
+        ]])
+        ->get(route('transactions.create', 'expense'))
+        ->assertOk();
+
+    // Contra expense account preserves attempted GL 52101 as selected and does not reset to default option
+    $redisplay->assertSee('<option value="'.$gl52101->id.'" selected>52101 — Teaching Materials</option>', false);
+    $redisplay->assertDontSee('<option value="" selected>Use GL mapping default</option>', false);
+
+    // Other inputs preserved
+    $redisplay->assertSee('value="100.00"', false);
+    $redisplay->assertSee('value="UAT-EXP-DNR-DENY-001"', false);
+    $redisplay->assertSee('Negative validation restricted fund test');
+    $redisplay->assertSee('<option value="'.$dnrUat1->id.'" selected>DNR-UAT1 — DEMO UAT Rehabilitation Project (restricted)</option>', false);
+
+    // 3. Positive test: permitted GL 52201 succeeds with DNR-UAT1
+    $validResponse = $this->actingAs($this->maker)->post(route('transactions.store'), [
+        'type' => 'expense',
+        'branch_id' => $this->branch->id,
+        'transaction_date' => '2026-01-15',
+        'amount' => '100.00',
+        'settlement_type' => 'accrued',
+        'contra_account_id' => $gl52201->id,
+        'fund_id' => $dnrUat1->id,
+        'reference_number' => 'UAT-EXP-DNR-ALLOW-001',
+        'narration' => 'Permitted charge restricted fund test',
+    ]);
+
+    $validResponse->assertSessionHasNoErrors();
+    $validResponse->assertRedirect();
+
+    $created = OperationalTransaction::query()->where('reference_number', 'UAT-EXP-DNR-ALLOW-001')->firstOrFail();
+    expect($created->contra_account_id)->toBe($gl52201->id)
+        ->and($created->fund_id)->toBe($dnrUat1->id)
+        ->and($created->status->value)->toBe('draft');
 });

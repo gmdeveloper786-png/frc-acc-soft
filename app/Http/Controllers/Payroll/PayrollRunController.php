@@ -21,11 +21,13 @@ use App\Services\Payroll\PayrollRunService;
 use App\Services\Payroll\PayslipService;
 use App\Services\Payroll\StaffAdvanceRecoveryService;
 use App\Services\Payroll\StaffAdvanceService;
+use App\Services\PettyCash\ImprestLedgerService;
 use Brick\Math\BigDecimal;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class PayrollRunController extends Controller
@@ -65,7 +67,7 @@ class PayrollRunController extends Controller
         return redirect()->route('payroll-runs.show', $run)->with('status', 'Draft payroll run created from the salary structures. Review the lines, then validate.');
     }
 
-    public function show(Request $request, PayrollRun $payrollRun, BranchAccess $access, EmployeeService $employees, PayrollRunService $service, StaffAdvanceRecoveryService $advanceRecovery, PayslipService $payslips): View
+    public function show(Request $request, PayrollRun $payrollRun, BranchAccess $access, EmployeeService $employees, PayrollRunService $service, StaffAdvanceRecoveryService $advanceRecovery, PayslipService $payslips, ImprestLedgerService $imprest): View
     {
         $this->guardBranch($request, $payrollRun, $access);
         $run = $service->syncPaidStatus($payrollRun);
@@ -76,7 +78,16 @@ class PayrollRunController extends Controller
             ...$this->detail($run, $sensitive, $service),
             'canApprove' => $service->canApprove($run, $user),
             'isMaker' => in_array($user->id, [$run->created_by, $run->validated_by, $run->submitted_by], true),
-            'financialAccounts' => $user->can('payroll.pay') ? FinancialAccount::query()->usableIn((int) $run->branch_id)->where('is_active', true)->whereIn('type', ['bank', 'cash'])->orderBy('name')->get() : collect(),
+            'financialAccounts' => $user->can('payroll.pay')
+                ? FinancialAccount::query()
+                    ->usableIn((int) $run->branch_id)
+                    ->where('is_active', true)
+                    ->whereIn('type', ['bank', 'cash'])
+                    ->orderBy('name')
+                    ->get()
+                    ->reject(fn (FinancialAccount $account): bool => $account->type === 'cash' && $imprest->activeFloatFor($account) !== null)
+                    ->values()
+                : collect(),
             // Staff advance instalments due by this period, for the preparer to put on the draft lines.
             'dueRecoveries' => $sensitive && in_array($run->status, [PayrollRunStatus::Draft, PayrollRunStatus::Rejected, PayrollRunStatus::Validated], true) ? $advanceRecovery->dueForRun($run) : collect(),
             'payslipsAvailable' => $sensitive && $payslips->isIssuable($run),
@@ -189,7 +200,7 @@ class PayrollRunController extends Controller
         return back()->with('status', 'Salary accrual posted as voucher '.$run->journalEntry->voucher_number.'.');
     }
 
-    public function pay(Request $request, PayrollRun $payrollRun, PayrollRunService $service): RedirectResponse
+    public function pay(Request $request, PayrollRun $payrollRun, PayrollRunService $service, ImprestLedgerService $imprest): RedirectResponse
     {
         $data = $request->validate([
             'type' => ['required', Rule::in(['bank_payment', 'cash_payment'])],
@@ -198,6 +209,21 @@ class PayrollRunController extends Controller
             'transaction_date' => ['required', 'date'],
             'reference_number' => ['nullable', 'string', 'max:100'],
         ]);
+
+        $account = FinancialAccount::query()->find($data['financial_account_id']);
+        if (! $account || ! $account->is_active || ! $account->usableIn((int) $payrollRun->branch_id)) {
+            throw ValidationException::withMessages(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
+        }
+        if ($data['type'] === 'bank_payment' && $account->type !== 'bank') {
+            throw ValidationException::withMessages(['financial_account_id' => 'A bank account is required.']);
+        }
+        if ($data['type'] === 'cash_payment' && $account->type !== 'cash') {
+            throw ValidationException::withMessages(['financial_account_id' => 'A cash account is required.']);
+        }
+        if ($imprest->activeFloatFor($account) !== null) {
+            throw ValidationException::withMessages(['financial_account_id' => 'Petty cash accounts cannot be used for salary payments.']);
+        }
+
         $transaction = $service->pay($payrollRun, $data, $request->user());
 
         return back()->with('status', "Salary payment #{$transaction->id} created as a draft in the payment workflow. It must be submitted, approved, disbursed and posted there.");

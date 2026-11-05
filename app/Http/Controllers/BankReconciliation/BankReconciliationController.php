@@ -14,6 +14,7 @@ use App\Services\BankReconciliation\ReconciliationReport;
 use App\Services\BankReconciliation\ReconciliationService;
 use App\Services\BranchAccess;
 use App\Services\Reports\ReportExporter;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -39,7 +40,9 @@ class BankReconciliationController extends Controller
 
     public function create(Request $request, BranchAccess $access): View
     {
-        $accounts = $this->bankAccounts($request, $access);
+        $accounts = $this->bankAccounts($request, $access)->filter(function (FinancialAccount $account) use ($request): bool {
+            return ! $account->isShared() || $request->user()->can('branches.view_all');
+        });
         $statements = BankStatement::query()->whereIn('financial_account_id', $accounts->pluck('id'))->where('status', BankStatement::IMPORTED)->orderByDesc('period_to')->get();
 
         return view('bank-reconciliation.create', compact('accounts', 'statements'));
@@ -71,7 +74,7 @@ class BankReconciliationController extends Controller
             'editable' => $editable,
             'requireReference' => $requireReference,
             'suggestions' => $editable ? $calculator->suggestions($bankReconciliation, $requireReference) : [],
-            'bookCandidates' => $editable ? $calculator->outstandingBookLines($bankReconciliation) : collect(),
+            'bookCandidates' => $editable ? $calculator->candidateBookLines($bankReconciliation) : collect(),
             'firstStatementDate' => BankStatement::query()->where('financial_account_id', $bankReconciliation->financial_account_id)->where('status', BankStatement::IMPORTED)->min('period_from'),
             'isMaker' => in_array($request->user()->id, $service->makerIds($bankReconciliation), true),
             'formula' => ReconciliationReport::FORMULA,
@@ -132,6 +135,21 @@ class BankReconciliationController extends Controller
     /** @return Collection<int, FinancialAccount> */
     private function bankAccounts(Request $request, BranchAccess $access): Collection
     {
-        return FinancialAccount::query()->with('branch')->where('type', 'bank')->bookVisibleTo($request->user(), $access->scope($request->user())->select('id'))->orderBy('name')->get();
+        $user = $request->user();
+        $branchIds = $access->scope($user)->select('id');
+
+        return FinancialAccount::query()
+            ->with('branch')
+            ->where('type', 'bank')
+            ->where(function (Builder $query) use ($user, $branchIds): void {
+                $query->where(fn (Builder $own) => $own->where('scope', FinancialAccount::SCOPE_BRANCH)->whereIn('branch_id', $branchIds))
+                    ->when($user->can('branches.view_all'), fn (Builder $all) => $all->orWhere('scope', FinancialAccount::SCOPE_ORGANIZATION))
+                    ->when(! $user->can('branches.view_all'), fn (Builder $shared) => $shared->orWhere(fn (Builder $custodian) => $custodian
+                        ->where('scope', FinancialAccount::SCOPE_ORGANIZATION)
+                        ->whereIn('branch_id', $branchIds)
+                    ));
+            })
+            ->orderBy('name')
+            ->get();
     }
 }

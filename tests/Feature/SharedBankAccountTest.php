@@ -290,3 +290,63 @@ test('withdraw is offered only for an unreferenced statement; a statement of a c
     $this->delete(route('bank-statements.destroy', $retained))->assertSessionHasErrors('statement');
     expect($free->fresh())->toBeNull()->and($retained->fresh())->not->toBeNull();
 });
+
+test('an approver of the custodian branch can view and approve a shared reconciliation, enforcing maker-checker and cross-branch isolation', function () {
+    // 1. Setup shared account reconciliation prepared and submitted by Admin (Maker)
+    $this->actingAs($this->admin);
+    $payload = ['statement_date' => '2026-01-31', 'statement_closing_balance' => '0.00'];
+    $this->post(route('bank-reconciliations.store'), [...$payload, 'financial_account_id' => $this->mcb->id])->assertSessionHasNoErrors();
+    $reconciliation = BankReconciliation::query()->where('financial_account_id', $this->mcb->id)->firstOrFail();
+
+    $this->post(route('bank-reconciliations.submit', $reconciliation))->assertSessionHasNoErrors();
+    expect($reconciliation->fresh()->status)->toBe(BankReconciliation::SUBMITTED)
+        ->and($reconciliation->fresh()->submitted_by)->toBe($this->admin->id);
+
+    // 2. Maker-checker: Admin prepared/submitted it, so Admin CANNOT approve it
+    $this->post(route('bank-reconciliations.approve', $reconciliation))
+        ->assertSessionHasErrors('approval');
+    expect($reconciliation->fresh()->status)->toBe(BankReconciliation::SUBMITTED);
+
+    // 3. Custodian Branch Approver (equivalent to TEST Approver)
+    $custodianApprover = User::factory()->create(['name' => 'Custodian Branch Approver']);
+    $custodianApprover->assignRole(SystemRole::Approver->value);
+    $custodianApprover->branches()->attach($this->branchA); // Custodian branch
+
+    // Can see shared account and reconciliation on the listing
+    $this->actingAs($custodianApprover)->get(route('bank-reconciliations.index'))->assertOk()
+        ->assertSee('MCB Main')
+        ->assertSee('All Branches — Shared')
+        ->assertSee('Custodian: Shared Bank Branch A')
+        ->assertSee(route('bank-reconciliations.show', $reconciliation));
+
+    // Can view the submitted reconciliation details and statement
+    $this->get(route('bank-reconciliations.show', $reconciliation))->assertOk()
+        ->assertSee('Approve and lock')
+        ->assertDontSee('You prepared or changed this reconciliation');
+    $this->get(route('bank-reconciliations.statement', $reconciliation))->assertOk();
+
+    // 4. Cross-branch isolation: Branch B approver cannot view, list, or approve the shared reconciliation
+    $branchBApprover = User::factory()->create(['name' => 'Branch B Approver']);
+    $branchBApprover->assignRole(SystemRole::Approver->value);
+    $branchBApprover->branches()->attach($this->branchB);
+
+    $this->actingAs($branchBApprover)->get(route('bank-reconciliations.index'))->assertOk()
+        ->assertDontSee('MCB Main')
+        ->assertDontSee(route('bank-reconciliations.show', $reconciliation));
+    $this->get(route('bank-reconciliations.show', $reconciliation))->assertForbidden();
+    $this->post(route('bank-reconciliations.approve', $reconciliation))->assertForbidden();
+
+    // 5. Missing-permission user in custodian branch cannot approve
+    $custodianCashier = User::factory()->create(['name' => 'Custodian Cashier']);
+    $custodianCashier->assignRole(SystemRole::Cashier->value);
+    $custodianCashier->branches()->attach($this->branchA);
+
+    $this->actingAs($custodianCashier)->post(route('bank-reconciliations.approve', $reconciliation))->assertForbidden();
+
+    // 6. Independent Custodian Approver successfully approves and locks the reconciliation
+    $this->actingAs($custodianApprover)->post(route('bank-reconciliations.approve', $reconciliation))
+        ->assertSessionHasNoErrors()->assertRedirect(route('bank-reconciliations.show', $reconciliation));
+
+    expect($reconciliation->fresh()->status)->toBe(BankReconciliation::APPROVED)
+        ->and($reconciliation->fresh()->approved_by)->toBe($custodianApprover->id);
+});

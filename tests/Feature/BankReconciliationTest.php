@@ -480,7 +480,7 @@ test('opening entries clear as brought forward and a cancelled cheque with its r
         ->assertSessionHasErrors('journal_line_id');
     $this->actingAs($this->preparer)->post(route('bank-reconciliations.brought-forward', $reconciliation), ['journal_line_id' => $opening->id, 'note' => 'Opening balance agreed to the December statement'])
         ->assertSessionHasNoErrors();
-    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]))->assertSessionHasNoErrors();
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), ['reason' => 'Bank error corrected later'])->assertSessionHasNoErrors();
 
     expect(bankRecFigures($reconciliation))->toMatchArray(['uncleared_total' => '0.00', 'unrecorded_total' => '0.00', 'difference' => '0.00'])
         ->and($line->refresh()->status)->toBe('ignored')
@@ -497,7 +497,7 @@ test('a draft can be cancelled with a reason, releasing its matches, clearances 
     $this->actingAs($this->preparer);
     $this->post(route('bank-reconciliations.matches.store', $reconciliation), ['statement_line_id' => $line->id, 'journal_line_id' => $deposit->id])->assertSessionHasNoErrors();
     $this->post(route('bank-reconciliations.brought-forward', $reconciliation), ['journal_line_id' => $opening->id, 'note' => 'Opening balance'])->assertSessionHasNoErrors();
-    $this->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $noise]))->assertSessionHasNoErrors();
+    $this->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $noise]), ['reason' => 'Bank fee reversed subsequently'])->assertSessionHasNoErrors();
     $journalLines = JournalLine::query()->count();
     $this->get(route('bank-reconciliations.show', $reconciliation))->assertSee('Cancel draft');
 
@@ -580,4 +580,315 @@ test('cancelling a draft reconciliation releases its matches, so their journals 
     $service->cancel($reconciliation->fresh(), 'Started on the wrong statement', $this->preparer);
 
     expect(app(JournalReversalService::class)->reverse($line->journalEntry->fresh(), $this->january, '2026-01-25', 'Cheque cancelled', $this->admin)->status->value)->toBe('posted');
+});
+
+test('create reconciliation form renders statement options with auto-fill data attributes', function () {
+    bankRecStatement($this->bankA, [
+        'period_from' => '2026-01-01',
+        'period_to' => '2026-01-31',
+        'opening_balance' => '10000.0000',
+        'closing_balance' => '650100.0000',
+    ]);
+
+    $response = $this->actingAs($this->preparer)->get(route('bank-reconciliations.create'));
+
+    $response->assertOk();
+    $response->assertSee('data-account-id="'.$this->bankA->id.'"', false);
+    $response->assertSee('data-period-to="2026-01-31"', false);
+    $response->assertSee('data-closing-balance="650100.00"', false);
+    $response->assertSee('id="bank-reconciliation-create-script"', false);
+});
+
+test('submitting an imported statement uses its exact period end date and closing balance, rejecting manipulated browser inputs', function () {
+    $statement = bankRecStatement($this->bankA, [
+        'period_from' => '2026-01-01',
+        'period_to' => '2026-01-22',
+        'opening_balance' => '0.0000',
+        'closing_balance' => '650100.0000',
+    ]);
+
+    $response = $this->actingAs($this->preparer)->post(route('bank-reconciliations.store'), [
+        'financial_account_id' => $this->bankA->id,
+        'bank_statement_id' => $statement->id,
+        'statement_date' => '2026-01-31',
+        'statement_closing_balance' => '999999.00',
+    ]);
+
+    $response->assertSessionHasNoErrors();
+
+    $reconciliation = BankReconciliation::query()->where('financial_account_id', $this->bankA->id)->latest('id')->firstOrFail();
+    expect($reconciliation->bank_statement_id)->toBe($statement->id)
+        ->and($reconciliation->statement_date->toDateString())->toBe('2026-01-22')
+        ->and((string) $reconciliation->statement_closing_balance)->toBe('650100.0000');
+});
+
+test('backend validation rejects statement belonging to a different bank account or non-bank account', function () {
+    $statementB = bankRecStatement($this->bankB, [
+        'period_to' => '2026-01-22',
+        'closing_balance' => '650100.0000',
+    ]);
+
+    $response = $this->actingAs($this->preparer)->post(route('bank-reconciliations.store'), [
+        'financial_account_id' => $this->bankA->id,
+        'bank_statement_id' => $statementB->id,
+        'statement_date' => '2026-01-22',
+        'statement_closing_balance' => '650100.00',
+    ]);
+
+    $response->assertSessionHasErrors(['bank_statement_id']);
+
+    $cashLedger = Account::factory()->create([
+        'code' => '11101',
+        'name' => 'Cash in Hand Ledger',
+    ]);
+    $cashAccount = FinancialAccount::factory()->create([
+        'type' => 'cash',
+        'name' => 'Cash in Hand',
+        'branch_id' => $this->branchA,
+        'account_id' => $cashLedger,
+    ]);
+
+    $responseCash = $this->actingAs($this->preparer)->post(route('bank-reconciliations.store'), [
+        'financial_account_id' => $cashAccount->id,
+        'statement_date' => '2026-01-22',
+        'statement_closing_balance' => '100.00',
+    ]);
+
+    $responseCash->assertSessionHasErrors(['financial_account_id']);
+});
+
+test('a statement previously linked to a cancelled reconciliation can be reused in a new reconciliation', function () {
+    $service = app(ReconciliationService::class);
+    $statement = bankRecStatement($this->bankA, [
+        'period_from' => '2026-01-01',
+        'period_to' => '2026-01-22',
+        'opening_balance' => '0.0000',
+        'closing_balance' => '650100.0000',
+    ]);
+
+    $rec1 = $service->create($this->bankA, [
+        'bank_statement_id' => $statement->id,
+    ], $this->preparer);
+
+    expect($rec1->bank_statement_id)->toBe($statement->id)
+        ->and($statement->fresh()->status)->toBe('imported');
+
+    $service->cancel($rec1, 'Wrong start, restarting', $this->preparer);
+    expect($rec1->fresh()->status)->toBe('cancelled')
+        ->and($statement->fresh()->status)->toBe('imported');
+
+    $response = $this->actingAs($this->preparer)->post(route('bank-reconciliations.store'), [
+        'financial_account_id' => $this->bankA->id,
+        'bank_statement_id' => $statement->id,
+        'statement_date' => '2026-01-22',
+        'statement_closing_balance' => '650100.00',
+    ]);
+
+    $response->assertSessionHasNoErrors();
+    $rec2 = BankReconciliation::query()->where('financial_account_id', $this->bankA->id)->where('id', '!=', $rec1->id)->firstOrFail();
+    expect($rec2->bank_statement_id)->toBe($statement->id)
+        ->and($rec2->status)->toBe('draft');
+});
+
+test('reversed vouchers and their reversal vouchers never appear in auto-match suggestions or manual matching dropdown', function () {
+    $calculator = app(ReconciliationCalculator::class);
+    $reversals = app(JournalReversalService::class);
+
+    $originalLine = bankRecJournal($this, $this->bankA, '2026-01-15', '100.00', 'REF-REV-001');
+    $reversalEntry = $reversals->reverse($originalLine->journalEntry->fresh(), $this->january, '2026-01-16', 'Mistaken receipt', $this->admin);
+    $reversalLine = $reversalEntry->lines()->where('account_id', $this->bankA->account_id)->sole();
+
+    $eligibleLine = bankRecJournal($this, $this->bankA, '2026-01-15', '100.00', 'REF-VALID-001');
+
+    bankRecLine(bankRecStatement($this->bankA), '2026-01-15', '100.00');
+
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '100.00');
+
+    $candidates = $calculator->candidateBookLines($reconciliation);
+    expect($candidates->pluck('id'))->not->toContain($originalLine->id)
+        ->and($candidates->pluck('id'))->not->toContain($reversalLine->id)
+        ->and($candidates->pluck('id'))->toContain($eligibleLine->id);
+
+    $suggestions = $calculator->suggestions($reconciliation);
+    $suggestedJournalLineIds = collect($suggestions)->pluck('journal_line.id')->all();
+    expect($suggestedJournalLineIds)->not->toContain($originalLine->id)
+        ->and($suggestedJournalLineIds)->not->toContain($reversalLine->id)
+        ->and($suggestedJournalLineIds)->toContain($eligibleLine->id);
+
+    $response = $this->actingAs($this->preparer)->get(route('bank-reconciliations.show', $reconciliation));
+    $response->assertOk();
+    $response->assertSee($eligibleLine->journalEntry->voucher_number);
+    $response->assertDontSee($originalLine->journalEntry->voucher_number);
+    $response->assertDontSee($reversalEntry->voucher_number);
+});
+
+test('forged match attempts on reversed vouchers and reversal vouchers remain rejected by backend validation', function () {
+    $reversals = app(JournalReversalService::class);
+
+    $originalLine = bankRecJournal($this, $this->bankA, '2026-01-15', '100.00');
+    $reversalEntry = $reversals->reverse($originalLine->journalEntry->fresh(), $this->january, '2026-01-16', 'Mistaken receipt', $this->admin);
+    $reversalLine = $reversalEntry->lines()->where('account_id', $this->bankA->account_id)->sole();
+
+    $stmtLine = bankRecLine(bankRecStatement($this->bankA), '2026-01-15', '100.00');
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '100.00');
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.matches.store', $reconciliation), [
+        'statement_line_id' => $stmtLine->id,
+        'journal_line_id' => $originalLine->id,
+    ])->assertSessionHasErrors(['journal_line_id' => 'Only a currently posted, unreversed book entry can be matched.']);
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.matches.store', $reconciliation), [
+        'statement_line_id' => $stmtLine->id,
+        'journal_line_id' => $reversalLine->id,
+    ])->assertSessionHasErrors(['journal_line_id' => 'Only a currently posted, unreversed book entry can be matched.']);
+
+    expect(BankReconciliationMatch::query()->where('bank_reconciliation_id', $reconciliation->id)->count())->toBe(0);
+});
+
+test('eligible posted unreversed entries including shared bank account branches match normally', function () {
+    $lineA = bankRecJournal($this, $this->bankA, '2026-01-15', '500.00');
+    $stmtLineA = bankRecLine(bankRecStatement($this->bankA), '2026-01-15', '500.00');
+
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '500.00');
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.matches.store', $reconciliation), [
+        'statement_line_id' => $stmtLineA->id,
+        'journal_line_id' => $lineA->id,
+    ])->assertSessionHasNoErrors();
+
+    expect(BankReconciliationMatch::query()->where('bank_reconciliation_id', $reconciliation->id)->where('journal_line_id', $lineA->id)->exists())->toBeTrue()
+        ->and($stmtLineA->fresh()->status)->toBe(BankStatementLine::MATCHED);
+});
+
+test('reconciliation with difference zero cannot be submitted or approved while an unrecorded statement line remains unresolved', function () {
+    $stmt1 = bankRecStatement($this->bankA, ['period_from' => '2026-01-01', 'period_to' => '2026-01-22', 'opening_balance' => '1000.00', 'closing_balance' => '1100.00']);
+    $historicLine = bankRecLine($stmt1, '2026-01-22', '100.00', ['description' => 'Historic synthetic UAT entry']);
+    $rec1 = bankRecStart($this, $this->bankA, '2026-01-22', '1100.00');
+    app(ReconciliationService::class)->cancel($rec1, 'Cancelled earlier draft', $this->preparer);
+
+    $deposit = bankRecJournal($this, $this->bankA, '2026-01-25', '500.00');
+    $stmt2 = bankRecStatement($this->bankA, ['period_from' => '2026-01-25', 'period_to' => '2026-01-27', 'opening_balance' => '1000.00', 'closing_balance' => '1500.00']);
+    $currentLine = bankRecLine($stmt2, '2026-01-25', '500.00');
+
+    $rec2 = bankRecStart($this, $this->bankA, '2026-01-27', '500.00');
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.matches.store', $rec2), [
+        'statement_line_id' => $currentLine->id,
+        'journal_line_id' => $deposit->id,
+    ])->assertSessionHasNoErrors();
+
+    $figures = app(ReconciliationCalculator::class)->calculate($rec2);
+    expect($figures['difference']->isZero())->toBeTrue()
+        ->and($figures['unrecorded']->count())->toBe(1)
+        ->and($figures['unrecorded']->first()->id)->toBe($historicLine->id);
+
+    $this->actingAs($this->preparer)->get(route('bank-reconciliations.show', $rec2))->assertOk()
+        ->assertSee('Every statement item must be matched to a book entry or marked as ignored before the reconciliation can be submitted.')
+        ->assertSee('disabled>Submit for approval', false);
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.submit', $rec2))
+        ->assertSessionHasErrors(['status' => 'All statement items must be matched or ignored before submission or approval. (1 unrecorded item(s) remaining).']);
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$rec2, $historicLine]), ['reason' => 'Synthetic UAT entry reversed in books'])
+        ->assertSessionHasNoErrors();
+
+    expect($historicLine->fresh()->status)->toBe(BankStatementLine::IGNORED)
+        ->and(app(ReconciliationCalculator::class)->calculate($rec2)['unrecorded']->count())->toBe(0);
+
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.submit', $rec2))
+        ->assertSessionHasNoErrors();
+    expect($rec2->fresh()->status)->toBe(BankReconciliation::SUBMITTED);
+
+    $this->actingAs($this->approver)->post(route('bank-reconciliations.approve', $rec2))
+        ->assertSessionHasNoErrors();
+    expect($rec2->fresh()->status)->toBe(BankReconciliation::APPROVED);
+});
+
+test('ignoring a statement line requires a mandatory written reason, logs detailed audit trail, and supports full restore and re-ignore lifecycle', function () {
+    $statement = bankRecStatement($this->bankA, ['period_from' => '2026-01-02', 'opening_balance' => '5000.0000', 'closing_balance' => '5100.0000']);
+    $line = bankRecLine($statement, '2026-01-15', '100.00');
+    $line->update(['reference' => 'TEST-REF-999', 'description' => 'Test unrecorded bank charge']);
+    $reconciliation = bankRecStart($this, $this->bankA, '2026-01-31', '5100.00');
+
+    // 1. Missing reason, blank reason, whitespace-only reason, and reason shorter than 5 chars are rejected
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), [])
+        ->assertSessionHasErrors('reason');
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), ['reason' => ''])
+        ->assertSessionHasErrors('reason');
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), ['reason' => '    '])
+        ->assertSessionHasErrors('reason');
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), ['reason' => 'bad'])
+        ->assertSessionHasErrors('reason');
+
+    expect($line->fresh()->status)->toBe(BankStatementLine::UNMATCHED);
+
+    // 2. Ignore with valid reason succeeds
+    $ignoreReason = 'Synthetic UAT test line subsequently reversed in ledger';
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), [
+        'reason' => $ignoreReason,
+    ])->assertSessionHasNoErrors()->assertRedirect(route('bank-reconciliations.show', $reconciliation));
+
+    expect($line->fresh()->status)->toBe(BankStatementLine::IGNORED)
+        ->and($line->fresh()->ignored_in_reconciliation_id)->toBe($reconciliation->id);
+
+    // 3. AuditLog records all required details reliably
+    $ignoreLog = AuditLog::query()
+        ->where('event', 'bank_reconciliation.line_ignored')
+        ->where('auditable_id', $reconciliation->id)
+        ->latest('id')
+        ->firstOrFail();
+
+    expect($ignoreLog->actor_id)->toBe($this->preparer->id)
+        ->and($ignoreLog->properties)->toMatchArray([
+            'reconciliation_id' => $reconciliation->id,
+            'statement_line_id' => $line->id,
+            'bank_account' => $this->bankA->name,
+            'statement_reference' => 'TEST-REF-999',
+            'amount' => '100.0000',
+            'description' => 'Test unrecorded bank charge',
+            'reason' => $ignoreReason,
+        ]);
+
+    // 4. Audit Log Viewer displays details clearly without masking bank account name, reference, or reason
+    $viewer = bankRecUser(SystemRole::Auditor, $this->branchA);
+    $this->actingAs($viewer)->get(route('audit-logs.show', $ignoreLog))->assertOk()
+        ->assertSee('Bank Account')
+        ->assertSee($this->bankA->name)
+        ->assertSee('TEST-REF-999')
+        ->assertSee($ignoreReason)
+        ->assertDontSee('[hidden]');
+
+    // 5. Restore workflow: line is restored to unmatched and audit log is recorded
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.restore', [$reconciliation, $line]))
+        ->assertSessionHasNoErrors()->assertRedirect(route('bank-reconciliations.show', $reconciliation));
+
+    expect($line->fresh()->status)->toBe(BankStatementLine::UNMATCHED)
+        ->and($line->fresh()->ignored_in_reconciliation_id)->toBeNull();
+
+    $restoreLog = AuditLog::query()
+        ->where('event', 'bank_reconciliation.line_restored')
+        ->where('auditable_id', $reconciliation->id)
+        ->latest('id')
+        ->firstOrFail();
+
+    expect($restoreLog->actor_id)->toBe($this->preparer->id)
+        ->and($restoreLog->properties)->toMatchArray([
+            'reconciliation_id' => $reconciliation->id,
+            'statement_line_id' => $line->id,
+            'bank_account' => $this->bankA->name,
+            'statement_reference' => 'TEST-REF-999',
+            'amount' => '100.0000',
+            'description' => 'Test unrecorded bank charge',
+        ]);
+
+    // 6. When restored, submission is prevented because unrecorded line exists
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.submit', $reconciliation))
+        ->assertSessionHasErrors('status');
+
+    // 7. Re-ignoring with mandatory reason allows submission
+    $this->actingAs($this->preparer)->post(route('bank-reconciliations.lines.ignore', [$reconciliation, $line]), [
+        'reason' => 'Confirmed duplicate line set aside permanently',
+    ])->assertSessionHasNoErrors();
+
+    expect($line->fresh()->status)->toBe(BankStatementLine::IGNORED);
 });

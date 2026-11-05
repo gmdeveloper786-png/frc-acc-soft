@@ -7,6 +7,7 @@ use App\Enums\AccountType;
 use App\Enums\FinancialAccountType;
 use App\Enums\FinancialStatement;
 use App\Enums\NormalBalance;
+use App\Services\ManualJournalGuard;
 use Database\Factories\AccountFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
@@ -121,6 +122,36 @@ class Account extends Model
                     $query->where('account_type', AccountType::Asset->value)
                         ->where('normal_balance', NormalBalance::Debit->value)
                         ->where('financial_statement', FinancialStatement::BalanceSheet->value);
+                });
+            });
+    }
+
+    /**
+     * Expense and capital asset ledgers eligible to be charged to a fund.
+     * Excludes cash, bank, receivables, advances, inventory, and contra-assets.
+     *
+     * @param  Builder<Account>  $query
+     */
+    public function scopeEligibleForFundCharge(Builder $query): void
+    {
+        $controlled = array_map('intval', app(ManualJournalGuard::class)->controlledAccountIds());
+
+        $query->where('level', AccountLevel::Ledger->value)
+            ->where('is_postable', true)
+            ->where('is_active', true)
+            ->where('normal_balance', NormalBalance::Debit->value)
+            ->whereNull('financial_account_type')
+            ->whereDoesntHave('financialAccounts')
+            ->when($controlled !== [], fn (Builder $q) => $q->whereNotIn('id', $controlled))
+            ->where(function (Builder $query): void {
+                $query->where(function (Builder $query): void {
+                    $query->where('account_type', AccountType::Expense->value)
+                        ->where('financial_statement', FinancialStatement::IncomeExpenditure->value);
+                })->orWhere(function (Builder $query): void {
+                    $query->where('account_type', AccountType::Asset->value)
+                        ->where('financial_statement', FinancialStatement::BalanceSheet->value)
+                        ->where('code', 'not like', '11%')
+                        ->where('code', 'not like', '125%');
                 });
             });
     }

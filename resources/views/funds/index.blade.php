@@ -36,7 +36,17 @@
             <td>{{ $fund->donor_name ?? '—' }}</td>
             <td class="text-end font-monospace">{{ $fund->grant_amount !== null ? number_format((float) $fund->grant_amount, 2) : '—' }}</td>
             <td>{{ $fund->start_date || $fund->end_date ? ($fund->start_date?->format('d M Y') ?? 'Open').' – '.($fund->end_date?->format('d M Y') ?? 'open') : '—' }}</td>
-            <td class="text-end">{{ $fund->permitted_accounts_count ?: 'Any' }}</td>
+            <td class="text-end">
+                @if($fund->isRestricted())
+                    @if($fund->permitted_accounts_count > 0)
+                        {{ $fund->permitted_accounts_count }}
+                    @else
+                        <span class="status-badge danger">No permitted ledgers configured — charges blocked</span>
+                    @endif
+                @else
+                    Any (Unrestricted)
+                @endif
+            </td>
             <td><span class="status-badge {{ $fund->is_active ? 'success' : 'neutral' }}">{{ $fund->is_active ? 'Active' : 'Inactive' }}</span></td>
             <td class="d-flex gap-1">
                 @if(auth()->user()->canAny(['funds.manage', 'grants.manage']))<a class="btn btn-sm btn-outline-primary" href="{{ route('funds.edit',$fund) }}">Edit</a>@endif

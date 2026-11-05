@@ -59,6 +59,42 @@ class PurchaseOrder extends Model
         return AccountingDecimal::string(AccountingDecimal::of($this->total_amount)->minus(AccountingDecimal::of($this->billedAmount())));
     }
 
+    /**
+     * Currently billable amount available for new purchase bills.
+     * Cancelled orders have zero billing authority.
+     */
+    public function availableForBillingAmount(): string
+    {
+        if ($this->status === PurchaseOrderStatus::Cancelled) {
+            return AccountingDecimal::string(BigDecimal::zero());
+        }
+
+        return $this->remainingAmount();
+    }
+
+    /**
+     * Whether the purchase order has been fully billed in both quantity and value.
+     */
+    public function isFullyBilled(): bool
+    {
+        if (! $this->activeBills()->exists()) {
+            return false;
+        }
+
+        if (AccountingDecimal::of($this->remainingAmount())->isPositive()) {
+            return false;
+        }
+
+        $lines = $this->relationLoaded('lines') ? $this->lines : $this->lines()->get();
+        foreach ($lines as $line) {
+            if (AccountingDecimal::of($line->remainingQuantity())->isPositive()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public function vendor(): BelongsTo
     {
         return $this->belongsTo(Vendor::class);

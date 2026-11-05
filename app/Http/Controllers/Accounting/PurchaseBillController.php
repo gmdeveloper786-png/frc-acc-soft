@@ -12,6 +12,7 @@ use App\Models\AccountingPeriod;
 use App\Models\AccountMapping;
 use App\Models\AuditLog;
 use App\Models\FrcService;
+use App\Models\Fund;
 use App\Models\PurchaseBill;
 use App\Models\PurchaseOrder;
 use App\Models\Vendor;
@@ -34,7 +35,7 @@ class PurchaseBillController extends Controller
         return view('accounting.purchase-bills.index', ['bills' => $bills, 'vendors' => Vendor::query()->orderBy('name')->get()]);
     }
 
-    public function create(Request $request, BranchAccess $access, PurchaseBillDebitAccountEligibility $eligibility): View
+    public function create(Request $request, BranchAccess $access, PurchaseBillDebitAccountEligibility $eligibility): View|RedirectResponse
     {
         abort_unless($request->user()->can('purchase_bills.create'), 403);
         $order = null;
@@ -42,6 +43,11 @@ class PurchaseBillController extends Controller
             $order = PurchaseOrder::query()->with(['lines', 'vendor', 'branch'])->findOrFail($request->integer('purchase_order'));
             abort_unless($access->canAccess($request->user(), $order->branch), 403);
             abort_unless($order->status->acceptsBills(), 403, 'Only an approved or issued purchase order can be billed.');
+
+            if ($order->isFullyBilled() && ! $request->boolean('exception')) {
+                return redirect()->route('purchase-orders.show', $order)
+                    ->with('warning', "Purchase order {$order->po_number} is fully billed (Remaining PKR 0.00). Normal bill creation is disabled. Use 'Request billing exception' if an authorized overbilling exception is required.");
+            }
         }
 
         return view('accounting.purchase-bills.create', [
@@ -52,6 +58,7 @@ class PurchaseBillController extends Controller
             'eligibleDebitLedgers' => $eligibility->query()->orderBy('code')->get(),
             'payableLedgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->where('account_type', 'liability')->orderBy('code')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
+            'funds' => Fund::query()->where('is_active', true)->orderBy('code')->get(),
         ]);
     }
 
@@ -69,7 +76,7 @@ class PurchaseBillController extends Controller
     public function show(Request $request, PurchaseBill $purchaseBill, BranchAccess $access, PurchaseBillService $service): View
     {
         abort_unless($access->canAccess($request->user(), $purchaseBill->branch), 403);
-        $purchaseBill->load(['vendor', 'branch', 'payableAccount', 'purchaseOrder', 'lines.account', 'lines.service', 'payments.journalEntry', 'journalEntry.reversal', 'creator']);
+        $purchaseBill->load(['vendor', 'branch', 'payableAccount', 'purchaseOrder', 'fund', 'lines.account', 'lines.service', 'lines.fund', 'payments.journalEntry', 'journalEntry.reversal', 'creator']);
         $openPeriods = AccountingPeriod::query()->where('status', 'open')->orderBy('start_date')->get();
         $defaultReversalDate = today()->toDateString();
         $defaultReversalPeriodId = $openPeriods->first(fn (AccountingPeriod $period): bool => $defaultReversalDate >= $period->start_date->toDateString() && $defaultReversalDate <= $period->end_date->toDateString())?->id;
@@ -111,6 +118,7 @@ class PurchaseBillController extends Controller
             'eligibleDebitLedgers' => $eligibility->query()->orderBy('code')->get(),
             'payableLedgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)->where('account_type', 'liability')->orderBy('code')->get(),
             'services' => FrcService::query()->whereIn('status', ['publish', 'active'])->orderBy('name')->get(),
+            'funds' => Fund::query()->where('is_active', true)->orderBy('code')->get(),
         ]);
     }
 

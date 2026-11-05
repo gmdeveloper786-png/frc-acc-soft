@@ -13,7 +13,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['vendor_id', 'branch_id', 'payable_account_id', 'bill_number', 'invoice_date', 'due_date', 'purchase_order_reference', 'purchase_order_id', 'po_exception_status', 'po_exception_reason', 'po_exception_approved_by', 'po_exception_approved_at', 'description', 'total_amount', 'status', 'attachment_path', 'journal_entry_id', 'created_by', 'submitted_by', 'approved_by', 'submitted_at', 'approved_at', 'posted_at', 'rejection_reason'])]
+#[Fillable(['vendor_id', 'branch_id', 'payable_account_id', 'fund_id', 'bill_number', 'invoice_date', 'due_date', 'purchase_order_reference', 'purchase_order_id', 'po_exception_status', 'po_exception_reason', 'po_exception_approved_by', 'po_exception_approved_at', 'description', 'total_amount', 'status', 'attachment_path', 'journal_entry_id', 'created_by', 'submitted_by', 'approved_by', 'submitted_at', 'approved_at', 'posted_at', 'rejection_reason'])]
 class PurchaseBill extends Model
 {
     /** @use HasFactory<PurchaseBillFactory> */
@@ -26,8 +26,8 @@ class PurchaseBill extends Model
 
     public function outstandingAmount(): string
     {
-        // A reversed or cancelled bill has no active payable; the stored total stays as history.
-        if ($this->status === PurchaseBillStatus::Reversed || $this->status === PurchaseBillStatus::Cancelled) {
+        // A reversed, cancelled or rejected bill has no active payable; the stored total stays as history.
+        if ($this->status === PurchaseBillStatus::Reversed || $this->status === PurchaseBillStatus::Cancelled || $this->status === PurchaseBillStatus::Rejected) {
             return AccountingDecimal::string(BigDecimal::zero());
         }
 
@@ -59,6 +59,11 @@ class PurchaseBill extends Model
         return $this->belongsTo(JournalEntry::class);
     }
 
+    public function fund(): BelongsTo
+    {
+        return $this->belongsTo(Fund::class);
+    }
+
     public function lines(): HasMany
     {
         return $this->hasMany(PurchaseBillLine::class)->orderBy('line_number');
@@ -77,13 +82,13 @@ class PurchaseBill extends Model
     /** Payments that hold part of the bill: posted ones and those still in approval (not rejected or reversed). */
     public function reservingPayments(): HasMany
     {
-        return $this->payments()->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value]);
+        return $this->payments()->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value, OperationalTransactionStatus::Cancelled->value]);
     }
 
     /** What a new payment may still settle: the total less every reserving payment, as the vendor payment workflow enforces. */
     public function availableToPayAmount(): string
     {
-        if ($this->status === PurchaseBillStatus::Reversed || $this->status === PurchaseBillStatus::Cancelled) {
+        if ($this->status === PurchaseBillStatus::Reversed || $this->status === PurchaseBillStatus::Cancelled || $this->status === PurchaseBillStatus::Rejected) {
             return AccountingDecimal::string(BigDecimal::zero());
         }
 
@@ -101,5 +106,60 @@ class PurchaseBill extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    /**
+     * Presentation state for the purchase order exception badge.
+     *
+     * @return array{label: string, detail_label: string, tone: string, is_pending: bool}|null
+     */
+    public function poExceptionDisplay(): ?array
+    {
+        if (! $this->po_exception_status && ! $this->po_exception_reason) {
+            return null;
+        }
+
+        if ($this->po_exception_status === 'approved') {
+            return [
+                'label' => 'Exception approved',
+                'detail_label' => 'PO exception approved',
+                'tone' => 'success',
+                'is_pending' => false,
+            ];
+        }
+
+        if ($this->status === PurchaseBillStatus::Rejected) {
+            return [
+                'label' => 'Exception rejected',
+                'detail_label' => 'PO exception rejected',
+                'tone' => 'danger',
+                'is_pending' => false,
+            ];
+        }
+
+        if ($this->status === PurchaseBillStatus::Cancelled) {
+            return [
+                'label' => 'Exception cancelled',
+                'detail_label' => 'PO exception cancelled',
+                'tone' => 'neutral',
+                'is_pending' => false,
+            ];
+        }
+
+        if ($this->status === PurchaseBillStatus::Submitted) {
+            return [
+                'label' => 'Exception pending',
+                'detail_label' => 'PO exception pending',
+                'tone' => 'pending',
+                'is_pending' => true,
+            ];
+        }
+
+        return [
+            'label' => 'Exception draft',
+            'detail_label' => 'PO exception recorded (Draft)',
+            'tone' => 'neutral',
+            'is_pending' => false,
+        ];
     }
 }

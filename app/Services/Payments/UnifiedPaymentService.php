@@ -75,6 +75,7 @@ class UnifiedPaymentService
         $common = [
             'transaction_date' => $data['transaction_date'], 'amount' => $data['amount'], 'financial_account_id' => (int) $data['financial_account_id'],
             'reference_number' => $data['reference_number'] ?? null, 'attachment_path' => $data['attachment_path'] ?? null,
+            'attachment_original_name' => $data['attachment_original_name'] ?? null,
         ];
 
         return DB::transaction(function () use ($purpose, $payee, $data, $common, $actor): OperationalTransaction {
@@ -251,7 +252,7 @@ class UnifiedPaymentService
         }
         $source = 'staff_advance:'.$advance->id;
         $live = OperationalTransaction::query()->where('source_reference', $source)
-            ->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value])->lockForUpdate()->exists();
+            ->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value, OperationalTransactionStatus::Cancelled->value])->lockForUpdate()->exists();
         if ($live) {
             throw ValidationException::withMessages(['staff_advance_id' => 'A payment for this advance already exists. Complete, reject or reverse it first.']);
         }

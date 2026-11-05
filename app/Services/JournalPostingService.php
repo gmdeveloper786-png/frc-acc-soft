@@ -7,6 +7,7 @@ use App\Enums\FiscalYearStatus;
 use App\Enums\JournalStatus;
 use App\Models\AccountingPeriod;
 use App\Models\FiscalYear;
+use App\Models\ImprestReplenishment;
 use App\Models\JournalEntry;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
@@ -151,6 +152,7 @@ class JournalPostingService
                 'posted_by' => $actor->id,
                 'posted_at' => now(),
             ])->save();
+            ImprestReplenishment::query()->where('journal_entry_id', $journal->id)->update(['status' => ImprestReplenishment::POSTED]);
             $this->audit->log('journal.posted', $journal, ['voucher_number' => $voucherNumber, ...$totals, ...$approval]);
 
             return $journal->refresh()->load(['lines.account', 'voucherType', 'branch']);

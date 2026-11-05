@@ -179,12 +179,14 @@
                 </select>
             </div>
             <div data-behaviour-section="direct_expense">
+                @php $genPaymentFund = $funds->firstWhere('code', 'GEN') ?? $funds->firstWhere('category', 'general'); @endphp
                 <label class="form-label" for="payment-fund">Fund (optional)</label>
                 <select class="form-select @error('fund_id') is-invalid @enderror" id="payment-fund" name="fund_id">
-                    <option value="">No fund</option>
-                    @foreach($funds as $fund)<option value="{{ $fund->id }}" @selected((string) old('fund_id') === (string) $fund->id)>{{ $fund->label() }}{{ $fund->isRestricted() ? ' (restricted)' : '' }}</option>@endforeach
+                    <option value="">Default (GEN — General Fund)</option>
+                    @foreach($funds as $fund)<option value="{{ $fund->id }}" @selected((string) old('fund_id', $genPaymentFund?->id) === (string) $fund->id)>{{ $fund->label() }}{{ $fund->isRestricted() ? ' (restricted)' : '' }}</option>@endforeach
                 </select>
                 @error('fund_id')<div class="invalid-feedback">{{ $message }}</div>@enderror
+                <small class="form-text">Direct operating expenses default to GEN (General Fund). Select a restricted fund only for eligible project activities.</small>
             </div>
             <div class="form-span-2"><small class="form-text" id="payment-record-hint"></small></div>
 

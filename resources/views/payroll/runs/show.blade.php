@@ -226,7 +226,7 @@
         <p>Creates a draft payment in the payment workflow that debits Salary Payable. It is not approved, disbursed or posted here: the normal approval threshold and Director authority apply.</p>
         <div class="row g-3">
             <div class="col-md-6"><label class="form-label" for="payType">Payment type</label><select class="form-select" id="payType" name="type" required><option value="bank_payment" @selected(old('type')==='bank_payment')>Bank payment</option><option value="cash_payment" @selected(old('type')==='cash_payment')>Cash payment</option></select></div>
-            <div class="col-md-6"><label class="form-label" for="payAccount">Paid from</label><select class="form-select" id="payAccount" name="financial_account_id" required><option value="">Select account</option>@foreach($financialAccounts as $account)<option value="{{ $account->id }}" @selected(old('financial_account_id')==$account->id)>{{ $account->name }} ({{ $account->type }})</option>@endforeach</select></div>
+            <div class="col-md-6"><label class="form-label" for="payAccount">Paid from</label><select class="form-select" id="payAccount" name="financial_account_id" required><option value="">Select account</option>@foreach($financialAccounts as $account)<option value="{{ $account->id }}" data-type="{{ $account->type }}" @selected(old('financial_account_id')==$account->id)>{{ $account->name }} ({{ ucfirst($account->type) }})</option>@endforeach</select></div>
             <div class="col-md-6"><label class="form-label" for="payAmount">Amount</label><input class="form-control" id="payAmount" name="amount" inputmode="decimal" value="{{ old('amount', $sensitive ? $outstandingAmount : '') }}" required></div>
             <div class="col-md-6"><label class="form-label" for="payDate">Payment date</label><input class="form-control" id="payDate" type="date" name="transaction_date" value="{{ old('transaction_date', today()->toDateString()) }}" required></div>
             <div class="col-12"><label class="form-label" for="payReference">Reference (optional)</label><input class="form-control" id="payReference" name="reference_number" maxlength="100" value="{{ old('reference_number') }}"></div>
@@ -235,6 +235,39 @@
     </div>
     <div class="modal-footer"><button type="button" class="btn btn-outline-primary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary">Create draft payment</button></div>
 </form></div></div>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const payType = document.getElementById('payType');
+    const payAccount = document.getElementById('payAccount');
+    const payModal = document.getElementById('payModal');
+    if (!payType || !payAccount) return;
+
+    const filterAccounts = () => {
+        const expectedType = payType.value === 'bank_payment' ? 'bank' : (payType.value === 'cash_payment' ? 'cash' : '');
+        let selectedStillValid = false;
+
+        Array.from(payAccount.options).forEach((option) => {
+            if (!option.value) return;
+            const matches = option.dataset.type === expectedType;
+            option.hidden = !matches;
+            option.disabled = !matches;
+            if (matches && option.value === payAccount.value) {
+                selectedStillValid = true;
+            }
+        });
+
+        if (payAccount.value && !selectedStillValid) {
+            payAccount.value = '';
+        }
+    };
+
+    payType.addEventListener('change', filterAccounts);
+    if (payModal) {
+        payModal.addEventListener('show.bs.modal', filterAccounts);
+    }
+    filterAccounts();
+});
+</script>
 @endcan
 @can('payroll.post')
 <div class="modal fade" id="reverseModal" tabindex="-1" aria-labelledby="reverseModalTitle" aria-hidden="true"><div class="modal-dialog"><form class="modal-content" method="POST" action="{{ route('payroll-runs.reverse',$run) }}" data-submit-once>@csrf

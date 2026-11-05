@@ -94,6 +94,8 @@ async function approveAndPost(id, { approver = 'approver', submit = true } = {})
     let s = await txState(acc);
     if (s.actions.includes('Confirm disbursement')) { await clickTx(acc, 'Confirm disbursement'); s = await txState(acc); }
     if (s.actions.includes('Post to Journal Engine')) await clickTx(acc, 'Post to Journal Engine');
+    else if (s.actions.includes('Post Receipt')) await clickTx(acc, 'Post Receipt');
+    else if (s.actions.includes('Post Bank Receipt')) await clickTx(acc, 'Post Bank Receipt');
     return txState(acc);
 }
 
@@ -304,7 +306,7 @@ await runCase(newCase('RC-04', 'Bank receipt + printable receipt, expenses and p
     const br = await newTransaction(acc, 'bank_receipt', { branch_id: { text: 'UAT Branch A' }, transaction_date: TODAY, amount: '25000', financial_account_id: { text: 'UAT Bank A' }, contra_account_id: { re: '^41101 ' }, party_name: 'UAT Grant Office', reference_number: 'UAT-BR-001', narration: 'UAT release: synthetic grant received by bank' });
     check(c, 'Bank receipt draft saved', br.id > 0, [br.url, ...br.errors]);
     ctx.bankReceiptId = br.id;
-    await clickTx(acc, 'Post to Journal Engine');
+    await clickTx(acc, 'Post Bank Receipt');
     const brs = await txState(acc);
     ctx.brVoucher = brs.journal;
     c.evidence.bankReceipt = brs;

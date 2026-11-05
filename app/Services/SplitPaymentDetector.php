@@ -31,7 +31,7 @@ class SplitPaymentDetector
         $query = OperationalTransaction::query()
             ->whereIn('type', array_map(fn (OperationalTransactionType $type): string => $type->value, self::OUTFLOW_TYPES))
             ->where(fn ($query) => $query->where('type', '!=', OperationalTransactionType::Expense->value)->orWhere('settlement_type', 'paid'))
-            ->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value]);
+            ->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value, OperationalTransactionStatus::Cancelled->value]);
 
         if ($transaction->purchase_bill_id) {
             $basis = 'purchase_bill:'.$transaction->purchase_bill_id;

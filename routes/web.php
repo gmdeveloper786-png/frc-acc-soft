@@ -11,6 +11,7 @@ use App\Http\Controllers\Accounting\PurchaseBillController;
 use App\Http\Controllers\Accounting\PurchaseOrderController;
 use App\Http\Controllers\Accounting\TrialBalanceController;
 use App\Http\Controllers\Accounting\UnifiedPaymentController;
+use App\Http\Controllers\Accounting\UnifiedReceiptController;
 use App\Http\Controllers\Accounting\VendorController;
 use App\Http\Controllers\Accounting\VoucherTypeController;
 use App\Http\Controllers\AccountingSetup\AccountController;
@@ -175,6 +176,11 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::get('/donation-categories', [DonationCategoryController::class, 'index'])->middleware('permission:donations.manage_categories')->name('donation-categories.index');
     Route::put('/donation-categories/{donationCategory}', [DonationCategoryController::class, 'update'])->middleware('permission:donations.manage_categories')->name('donation-categories.update');
 
+    // Unified receipt entry (Stage 1: consolidated Cash and Bank receipts).
+    Route::get('/receipts', [UnifiedReceiptController::class, 'index'])->middleware('permission:receipts.view')->name('receipts.index');
+    Route::get('/receipts/create', [UnifiedReceiptController::class, 'create'])->middleware('permission:receipts.create')->name('receipts.create');
+    Route::post('/receipts', [UnifiedReceiptController::class, 'store'])->middleware('permission:receipts.create')->name('receipts.store');
+
     // Unified payment entry (Phase 1: bank payments). Each purpose checks its own permission in UnifiedPaymentService.
     Route::get('/finance/payments', [UnifiedPaymentController::class, 'index'])->name('payments.index');
     Route::get('/finance/payments/create', [UnifiedPaymentController::class, 'create'])->name('payments.create');
@@ -190,7 +196,9 @@ Route::middleware(['auth', 'active'])->group(function (): void {
     Route::post('/finance/transaction/{transaction}/disburse', [OperationalTransactionController::class, 'disburse'])->name('transactions.disburse');
     Route::post('/finance/transaction/{transaction}/post', [OperationalTransactionController::class, 'post'])->name('transactions.post');
     Route::post('/finance/transaction/{transaction}/reverse', [OperationalTransactionController::class, 'reverse'])->name('transactions.reverse');
+    Route::post('/finance/transaction/{transaction}/cancel-draft', [OperationalTransactionController::class, 'cancelDraft'])->name('transactions.cancel-draft');
     Route::get('/finance/transaction/{transaction}/acknowledgment', [OperationalTransactionController::class, 'acknowledgment'])->name('transactions.acknowledgment');
+    Route::get('/finance/transaction/{transaction}/attachment', [OperationalTransactionController::class, 'attachment'])->name('transactions.attachment');
 
     Route::resource('purchase-bills', PurchaseBillController::class)->only(['index', 'create', 'store', 'show', 'edit', 'update'])->middleware('permission:purchase_bills.view');
     Route::post('/purchase-bills/{purchaseBill}/submit', [PurchaseBillController::class, 'submit'])->name('purchase-bills.submit');

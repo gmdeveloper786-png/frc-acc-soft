@@ -17,6 +17,7 @@ use App\Models\Branch;
 use App\Models\Employee;
 use App\Models\FinancialAccount;
 use App\Models\FiscalYear;
+use App\Models\ImprestFloat;
 use App\Models\JournalEntry;
 use App\Models\JournalLine;
 use App\Models\OperationalTransaction;
@@ -744,4 +745,179 @@ test('the unified payment screen pays salary through the payroll workflow, its s
         ->and(fn () => $payments->create([...$data, 'amount' => '0.01'], $this->maker))->toThrow(ValidationException::class, 'unpaid net salary')
         ->and(fn () => $payments->create([...$data, 'amount' => '1.00', 'payee_type_id' => PayeeType::query()->where('code', 'vendor')->value('id')], $this->maker))->toThrow(ValidationException::class, 'cannot be used')
         ->and(fn () => $payments->create([...$data, 'amount' => '1.00'], $this->approver))->toThrow(HttpException::class);
+});
+
+test('salary payment modal displays eligible bank and cash accounts but excludes petty cash floats', function () {
+    payrollEmployee($this);
+    $run = payrollPosted($this);
+
+    // Create a Cash in Hand account
+    $cash = FinancialAccount::factory()->create([
+        'name' => 'Cash in Hand — Main Office',
+        'type' => 'cash',
+        'branch_id' => $this->branch->id,
+        'account_id' => Account::factory()->create(['account_type' => 'asset', 'is_postable' => true, 'is_active' => true]),
+        'is_active' => true,
+    ]);
+
+    // Create a Petty Cash account with active ImprestFloat
+    $pettyCashAccount = Account::factory()->create(['account_type' => 'asset', 'is_postable' => true, 'is_active' => true]);
+    $petty = FinancialAccount::factory()->create([
+        'name' => 'Petty Cash Box',
+        'type' => 'cash',
+        'branch_id' => $this->branch->id,
+        'account_id' => $pettyCashAccount->id,
+        'is_active' => true,
+    ]);
+    ImprestFloat::factory()->create([
+        'branch_id' => $this->branch->id,
+        'account_id' => $pettyCashAccount->id,
+        'source_financial_account_id' => $this->bank->id,
+        'is_active' => true,
+    ]);
+
+    $response = $this->get(route('payroll-runs.show', $run))->assertOk();
+
+    // Bank and Cash in Hand accounts should be present
+    $response->assertSee($this->bank->name);
+    $response->assertSee('Cash in Hand — Main Office');
+
+    // Petty Cash float account must NOT be present
+    $response->assertDontSee('Petty Cash Box');
+});
+
+test('salary payment backend validation enforces account type, active status, branch access and rejects petty cash', function () {
+    payrollEmployee($this, ['BASIC' => '50000.0000', 'TAX' => '500.0000']);
+    $run = payrollPosted($this);
+    $service = app(PayrollRunService::class);
+
+    $cash = FinancialAccount::factory()->create([
+        'name' => 'Cash in Hand — Main',
+        'type' => 'cash',
+        'branch_id' => $this->branch->id,
+        'account_id' => Account::factory()->create(['account_type' => 'asset', 'is_postable' => true, 'is_active' => true]),
+        'is_active' => true,
+    ]);
+
+    $pettyAccount = Account::factory()->create(['account_type' => 'asset', 'is_postable' => true, 'is_active' => true]);
+    $pettyCash = FinancialAccount::factory()->create([
+        'name' => 'Petty Cash Drawer',
+        'type' => 'cash',
+        'branch_id' => $this->branch->id,
+        'account_id' => $pettyAccount->id,
+        'is_active' => true,
+    ]);
+    ImprestFloat::factory()->create([
+        'branch_id' => $this->branch->id,
+        'account_id' => $pettyAccount->id,
+        'source_financial_account_id' => $this->bank->id,
+        'is_active' => true,
+    ]);
+
+    $foreignBank = FinancialAccount::factory()->create([
+        'name' => 'Foreign Branch Bank',
+        'type' => 'bank',
+        'branch_id' => $this->otherBranch->id,
+        'account_id' => Account::factory()->create(['account_type' => 'asset', 'is_postable' => true, 'is_active' => true]),
+        'is_active' => true,
+    ]);
+
+    $inactiveBank = FinancialAccount::factory()->create([
+        'name' => 'Inactive Bank',
+        'type' => 'bank',
+        'branch_id' => $this->branch->id,
+        'account_id' => Account::factory()->create(['account_type' => 'asset', 'is_postable' => true, 'is_active' => true]),
+        'is_active' => false,
+    ]);
+
+    // 1. Bank payment with cash account should fail (backend validation)
+    $this->post(route('payroll-runs.pay', $run), [
+        'type' => 'bank_payment',
+        'financial_account_id' => $cash->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ])->assertSessionHasErrors(['financial_account_id' => 'A bank account is required.']);
+
+    // 2. Cash payment with bank account should fail (backend validation)
+    $this->post(route('payroll-runs.pay', $run), [
+        'type' => 'cash_payment',
+        'financial_account_id' => $this->bank->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ])->assertSessionHasErrors(['financial_account_id' => 'A cash account is required.']);
+
+    // 3. Petty cash account rejected for both cash payment and bank payment
+    $this->post(route('payroll-runs.pay', $run), [
+        'type' => 'cash_payment',
+        'financial_account_id' => $pettyCash->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ])->assertSessionHasErrors(['financial_account_id' => 'Petty cash accounts cannot be used for salary payments.']);
+
+    $this->post(route('payroll-runs.pay', $run), [
+        'type' => 'bank_payment',
+        'financial_account_id' => $pettyCash->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ])->assertSessionHasErrors(['financial_account_id' => 'A bank account is required.']);
+
+    // 4. Inactive account rejected
+    $this->post(route('payroll-runs.pay', $run), [
+        'type' => 'bank_payment',
+        'financial_account_id' => $inactiveBank->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ])->assertSessionHasErrors(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
+
+    // 5. Account from another branch rejected
+    $this->post(route('payroll-runs.pay', $run), [
+        'type' => 'bank_payment',
+        'financial_account_id' => $foreignBank->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ])->assertSessionHasErrors(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
+
+    // 6. Direct service call validation checks
+    expect(fn () => $service->pay($run, [
+        'type' => 'bank_payment',
+        'financial_account_id' => $cash->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ], $this->maker))->toThrow(ValidationException::class, 'A bank account is required.');
+
+    expect(fn () => $service->pay($run, [
+        'type' => 'cash_payment',
+        'financial_account_id' => $this->bank->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ], $this->maker))->toThrow(ValidationException::class, 'A cash account is required.');
+
+    expect(fn () => $service->pay($run, [
+        'type' => 'cash_payment',
+        'financial_account_id' => $pettyCash->id,
+        'amount' => '1000.0000',
+        'transaction_date' => '2026-01-31',
+    ], $this->maker))->toThrow(ValidationException::class, 'Petty cash accounts cannot be used for salary payments.');
+
+    // 7. Cash payment succeeds with valid Cash in Hand account
+    $cashPayment = $service->pay($run, [
+        'type' => 'cash_payment',
+        'financial_account_id' => $cash->id,
+        'amount' => '20000.0000',
+        'transaction_date' => '2026-01-31',
+    ], $this->maker);
+    expect($cashPayment->status)->toBe(OperationalTransactionStatus::Draft)
+        ->and($cashPayment->type->value)->toBe('cash_payment')
+        ->and($cashPayment->financial_account_id)->toBe($cash->id);
+
+    // 8. Bank payment succeeds with valid Bank account
+    $bankPayment = $service->pay($run->fresh(), [
+        'type' => 'bank_payment',
+        'financial_account_id' => $this->bank->id,
+        'amount' => '29500.0000',
+        'transaction_date' => '2026-01-31',
+    ], $this->maker);
+    expect($bankPayment->status)->toBe(OperationalTransactionStatus::Draft)
+        ->and($bankPayment->type->value)->toBe('bank_payment')
+        ->and($bankPayment->financial_account_id)->toBe($this->bank->id);
 });

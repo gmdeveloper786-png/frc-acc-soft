@@ -65,8 +65,7 @@ class FundController extends Controller
         return [
             'fund' => $fund,
             'parents' => Fund::query()->whereNull('parent_id')->when($fund, fn ($query) => $query->whereKeyNot($fund->id))->orderBy('code')->get(),
-            'chargeLedgers' => Account::query()->where('level', 'ledger')->where('is_postable', true)->where('is_active', true)
-                ->whereIn('account_type', ['expense', 'asset'])->orderBy('code')->get(),
+            'chargeLedgers' => Account::query()->eligibleForFundCharge()->orderBy('code')->get(),
         ];
     }
 }

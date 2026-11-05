@@ -87,6 +87,37 @@ class ReconciliationCalculator
     }
 
     /**
+     * Eligible unmatched book lines for matching: currently posted, unreversed,
+     * and not part of an offsetting reversal pair or reversal journal.
+     *
+     * @return Collection<int, JournalLine>
+     */
+    public function candidateBookLines(BankReconciliation $reconciliation): Collection
+    {
+        $outstanding = $this->outstandingBookLines($reconciliation);
+        if ($outstanding->isEmpty()) {
+            return collect();
+        }
+
+        $pairs = $this->reversalPairs($reconciliation, $outstanding);
+        $pairIds = $pairs->pluck('id')->all();
+
+        $entryIds = $outstanding->pluck('journal_entry_id')->unique()->all();
+        $hasReversalEntryIds = JournalEntry::query()
+            ->whereIn('reversal_of_id', $entryIds)
+            ->whereIn('status', [JournalStatus::Submitted, JournalStatus::Approved, JournalStatus::Posted])
+            ->pluck('reversal_of_id')
+            ->all();
+
+        return $outstanding
+            ->filter(fn (JournalLine $line): bool => $line->journalEntry->status === JournalStatus::Posted)
+            ->reject(fn (JournalLine $line): bool => in_array($line->id, $pairIds, true))
+            ->reject(fn (JournalLine $line): bool => $line->journalEntry->reversal_of_id !== null)
+            ->reject(fn (JournalLine $line): bool => in_array($line->journal_entry_id, $hasReversalEntryIds, true))
+            ->values();
+    }
+
+    /**
      * Unmatched statement lines of the account up to the statement date.
      *
      * @return Collection<int, BankStatementLine>
@@ -108,7 +139,7 @@ class ReconciliationCalculator
     public function suggestions(BankReconciliation $reconciliation, bool $requireReference = false): array
     {
         $statementLines = $this->unrecordedStatementLines($reconciliation);
-        $bookLines = $this->outstandingBookLines($reconciliation);
+        $bookLines = $this->candidateBookLines($reconciliation);
         $candidates = [];
         foreach ($statementLines as $statementLine) {
             $amount = AccountingDecimal::of($statementLine->amount);

@@ -18,6 +18,7 @@ class StorePurchaseBillRequest extends FormRequest
             'vendor_id' => ['required', 'integer', 'exists:vendors,id'],
             'branch_id' => ['required', 'integer', 'exists:branches,id'],
             'payable_account_id' => ['nullable', 'integer', 'exists:accounts,id'],
+            'fund_id' => ['nullable', 'integer', Rule::exists('funds', 'id')->where('is_active', true)],
             'purchase_order_id' => ['nullable', 'integer', 'exists:purchase_orders,id'],
             'po_exception_reason' => ['nullable', 'string', 'min:10', 'max:2000'],
             'lines.*.purchase_order_line_id' => ['nullable', 'integer', 'exists:purchase_order_lines,id'],
@@ -33,6 +34,28 @@ class StorePurchaseBillRequest extends FormRequest
             'lines.*.description' => ['required', 'string', 'max:500'],
             'lines.*.quantity' => ['required', 'decimal:0,4', 'gt:0'],
             'lines.*.unit_amount' => ['required', 'decimal:0,4', 'gt:0'],
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'lines.*.account_id.required' => 'Har bill line ke liye expense ya asset ledger select karna lazmi hai.',
+            'lines.*.account_id.integer' => 'Valid expense ya asset ledger select karein.',
+            'lines.*.account_id.exists' => 'Muntakhib kardah ledger account mojood nahi hai.',
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function attributes(): array
+    {
+        return [
+            'lines.*.account_id' => 'ledger account',
         ];
     }
 }

@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
-#[Fillable(['type', 'status', 'branch_id', 'transaction_date', 'party_name', 'amount', 'financial_account_id', 'contra_account_id', 'payable_account_id', 'vendor_id', 'service_id', 'fund_id', 'donation_category_id', 'purchase_bill_id', 'payable_obligation_id', 'reference_number', 'narration', 'settlement_type', 'approval_tier', 'attachment_path', 'source_system', 'source_reference', 'source_key', 'journal_entry_id', 'created_by', 'submitted_by', 'approved_by', 'disbursed_by', 'submitted_at', 'approved_at', 'disbursed_at', 'posted_at', 'rejection_reason', 'payment_purpose_id', 'payee_type_id', 'payee_employee_id', 'payee_id', 'payee_snapshot'])]
+#[Fillable(['type', 'status', 'branch_id', 'transaction_date', 'party_name', 'amount', 'financial_account_id', 'contra_account_id', 'payable_account_id', 'vendor_id', 'service_id', 'fund_id', 'donation_category_id', 'purchase_bill_id', 'payable_obligation_id', 'reference_number', 'narration', 'settlement_type', 'approval_tier', 'attachment_path', 'attachment_original_name', 'source_system', 'source_reference', 'source_key', 'journal_entry_id', 'created_by', 'submitted_by', 'approved_by', 'disbursed_by', 'submitted_at', 'approved_at', 'disbursed_at', 'posted_at', 'rejection_reason', 'payment_purpose_id', 'payee_type_id', 'payee_employee_id', 'payee_id', 'payee_snapshot'])]
 class OperationalTransaction extends Model
 {
     /** @use HasFactory<OperationalTransactionFactory> */

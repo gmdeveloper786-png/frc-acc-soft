@@ -5,6 +5,7 @@ namespace App\Http\Controllers\BankReconciliation;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\BankReconciliation\AutoMatchRequest;
 use App\Http\Requests\BankReconciliation\ClearBroughtForwardRequest;
+use App\Http\Requests\BankReconciliation\IgnoreStatementLineRequest;
 use App\Http\Requests\BankReconciliation\MatchStatementLineRequest;
 use App\Models\BankReconciliation;
 use App\Models\BankReconciliationMatch;
@@ -44,9 +45,9 @@ class BankReconciliationMatchController extends Controller
         return $this->back($bankReconciliation, 'Match removed.');
     }
 
-    public function ignore(Request $request, BankReconciliation $bankReconciliation, BankStatementLine $bankStatementLine, ReconciliationService $service): RedirectResponse
+    public function ignore(IgnoreStatementLineRequest $request, BankReconciliation $bankReconciliation, BankStatementLine $bankStatementLine, ReconciliationService $service): RedirectResponse
     {
-        $service->ignore($bankReconciliation, $bankStatementLine, $request->user());
+        $service->ignore($bankReconciliation, $bankStatementLine, $request->validated('reason'), $request->user());
 
         return $this->back($bankReconciliation, 'Statement line ignored.');
     }

@@ -31,8 +31,10 @@ class Fund extends Model
 
     public const CATEGORY_GRANT = 'grant';
 
+    public const CATEGORY_ZAKAT = 'zakat';
+
     /** @var array<string, string> */
-    public const CATEGORIES = ['general' => 'General', 'zakat' => 'Zakat / Charity', 'donor' => 'Donor-restricted', self::CATEGORY_GRANT => 'Grant project', 'capital' => 'Capital / Building'];
+    public const CATEGORIES = ['general' => 'General', self::CATEGORY_ZAKAT => 'Zakat / Charity', 'donor' => 'Donor-restricted', self::CATEGORY_GRANT => 'Grant project', 'capital' => 'Capital / Building'];
 
     /** Fields only a user holding grants.manage may set. */
     public const GRANT_FIELDS = ['donor_name', 'grant_amount', 'start_date', 'end_date'];
@@ -61,6 +63,17 @@ class Fund extends Model
     public function label(): string
     {
         return $this->code.' — '.$this->name;
+    }
+
+    public function isProjectChildOfDnr(): bool
+    {
+        if (! $this->parent_id) {
+            return false;
+        }
+
+        $parent = $this->relationLoaded('parent') ? $this->parent : $this->parent()->first();
+
+        return $parent && ($parent->code === 'DNR' || $parent->category === 'donor');
     }
 
     public function parent(): BelongsTo

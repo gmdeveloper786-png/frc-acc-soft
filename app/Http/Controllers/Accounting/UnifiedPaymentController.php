@@ -156,7 +156,9 @@ class UnifiedPaymentController extends Controller
     {
         $data = $request->validated();
         if ($request->hasFile('attachment')) {
-            $data['attachment_path'] = $request->file('attachment')->store('operational-finance', 'local');
+            $file = $request->file('attachment');
+            $data['attachment_path'] = $file->store('operational-finance', 'local');
+            $data['attachment_original_name'] = str($file->getClientOriginalName())->limit(250, '')->toString();
         }
         $transaction = $service->create($data, $request->user());
 
@@ -218,7 +220,7 @@ class UnifiedPaymentController extends Controller
         $obligation = $request->filled('obligation') ? $obligations->firstWhere('id', $request->integer('obligation')) : null;
         $advance = $request->filled('advance') ? $advances->firstWhere('id', $request->integer('advance')) : null;
         if ($advance && OperationalTransaction::query()->where('source_reference', 'staff_advance:'.$advance->id)
-            ->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value])->exists()) {
+            ->whereNotIn('status', [OperationalTransactionStatus::Rejected->value, OperationalTransactionStatus::Reversed->value, OperationalTransactionStatus::Cancelled->value])->exists()) {
             $advance = null;
         }
         $purpose = $purposes->first(fn ($purpose) => $purpose->behaviour === ($advance ? PaymentBehaviour::StaffAdvance : PaymentBehaviour::AccruedPayable));

@@ -16,6 +16,8 @@ use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\Branch;
 use App\Models\Employee;
+use App\Models\FinancialAccount;
+use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\OperationalTransaction;
 use App\Models\PayrollComponent;
@@ -28,10 +30,12 @@ use App\Services\AccountingDecimal;
 use App\Services\AccountMappingService;
 use App\Services\AuditLogger;
 use App\Services\BranchAccess;
+use App\Services\Funds\FundRestrictionPolicy;
 use App\Services\JournalPostingService;
 use App\Services\JournalReversalService;
 use App\Services\ManualJournalGuard;
 use App\Services\OperationalTransactionService;
+use App\Services\PettyCash\ImprestLedgerService;
 use App\Support\AppSettings;
 use Brick\Math\BigDecimal;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -61,6 +65,8 @@ class PayrollRunService
         private OperationalTransactionService $transactions,
         private ManualJournalGuard $guard,
         private StaffAdvanceRecoveryService $advanceRecovery,
+        private ImprestLedgerService $imprest,
+        private FundRestrictionPolicy $fundRules,
     ) {}
 
     /** Whether the Director-controlled payroll calculation policy has been approved. */
@@ -314,9 +320,17 @@ class PayrollRunService
             if (! $this->policyApproved()) {
                 throw ValidationException::withMessages(['policy' => 'Payroll posting is blocked: the "Payroll Calculation Policy Approved" setting ('.self::POLICY_SETTING.') has not been approved by the Director.']);
             }
+            if (blank($run->fund_id)) {
+                $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+                if ($genFund) {
+                    $run->update(['fund_id' => $genFund->id]);
+                    $run->refresh();
+                }
+            }
             $period = $this->assertOpenPeriod($run->period);
             $this->assertIntegrity($run);
             $entries = $this->accrualEntries($run);
+            $this->fundRules->check($entries, fn (int|string $index): string => "accrual.{$index}");
 
             $voucher = VoucherType::query()->where('code', 'SV')->where('is_active', true)->firstOrFail();
             $journal = JournalEntry::query()->create([
@@ -330,7 +344,14 @@ class PayrollRunService
                 'submitted_at' => $run->submitted_at, 'approved_at' => $run->approved_at,
             ]);
             foreach ($entries as $index => $entry) {
-                $journal->lines()->create(['line_number' => $index + 1, 'account_id' => $entry['account_id'], 'description' => $entry['description'], 'debit' => $entry['debit'], 'credit' => $entry['credit']]);
+                $journal->lines()->create([
+                    'line_number' => $index + 1,
+                    'account_id' => $entry['account_id'],
+                    'fund_id' => $entry['fund_id'] ?? null,
+                    'description' => $entry['description'],
+                    'debit' => $entry['debit'],
+                    'credit' => $entry['credit'],
+                ]);
             }
             $journal = $this->posting->postSystem($journal, $actor);
             $run->update(['status' => PayrollRunStatus::Posted, 'journal_entry_id' => $journal->id, 'posted_by' => $actor->id, 'posted_at' => now()]);
@@ -364,6 +385,19 @@ class PayrollRunService
             }
             if (! in_array($data['type'], [OperationalTransactionType::BankPayment->value, OperationalTransactionType::CashPayment->value], true)) {
                 throw ValidationException::withMessages(['type' => 'Salary is paid by a bank payment or a cash payment.']);
+            }
+            $financial = FinancialAccount::query()->find((int) ($data['financial_account_id'] ?? 0));
+            if (! $financial || ! $financial->is_active || ! $financial->usableIn((int) $run->branch_id)) {
+                throw ValidationException::withMessages(['financial_account_id' => 'The financial account must be active and belong to the selected branch.']);
+            }
+            if ($data['type'] === OperationalTransactionType::BankPayment->value && $financial->type !== 'bank') {
+                throw ValidationException::withMessages(['financial_account_id' => 'A bank account is required.']);
+            }
+            if ($data['type'] === OperationalTransactionType::CashPayment->value && $financial->type !== 'cash') {
+                throw ValidationException::withMessages(['financial_account_id' => 'A cash account is required.']);
+            }
+            if ($this->imprest->activeFloatFor($financial) !== null) {
+                throw ValidationException::withMessages(['financial_account_id' => 'Petty cash accounts cannot be used for salary payments.']);
             }
             try {
                 $amount = AccountingDecimal::of($data['amount']);
@@ -474,9 +508,11 @@ class PayrollRunService
         if ($lines === []) {
             throw ValidationException::withMessages(['lines' => 'A payroll run needs at least one employee line.']);
         }
+        $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
         try {
             $run = PayrollRun::query()->create([
                 'branch_id' => $branch->id, 'accounting_period_id' => $period->id, 'status' => PayrollRunStatus::Draft,
+                'fund_id' => $genFund?->id,
                 'active_key' => '1', 'source' => $source, 'created_by' => $actor->id,
             ]);
         } catch (UniqueConstraintViolationException) {
@@ -648,15 +684,15 @@ class PayrollRunService
             if (in_array((int) $component->account->id, $controlled, true)) {
                 throw ValidationException::withMessages(['mapping' => "Configuration error: deduction component {$component->name} points to a cash, bank or petty cash ledger. Salary payments go through the payroll payment workflow; change its account under Payroll Components before posting."]);
             }
-            $credits[] = ['account_id' => $component->account->id, 'description' => $component->name.' withheld', 'debit' => '0.0000', 'credit' => AccountingDecimal::string($total)];
+            $credits[] = ['account_id' => $component->account->id, 'fund_id' => null, 'description' => $component->name.' withheld', 'debit' => '0.0000', 'credit' => AccountingDecimal::string($total)];
         }
 
         $entries = [];
         foreach ($debits as $debit) {
-            $entries[] = ['account_id' => $debit['account']->id, 'description' => 'Salaries and benefits', 'debit' => AccountingDecimal::string($debit['total']), 'credit' => '0.0000'];
+            $entries[] = ['account_id' => $debit['account']->id, 'fund_id' => $run->fund_id, 'description' => 'Salaries and benefits', 'debit' => AccountingDecimal::string($debit['total']), 'credit' => '0.0000'];
         }
         if (AccountingDecimal::of($run->net_amount)->isPositive()) {
-            $entries[] = ['account_id' => $salaryPayable->id, 'description' => 'Net salaries payable', 'debit' => '0.0000', 'credit' => AccountingDecimal::string(AccountingDecimal::of($run->net_amount))];
+            $entries[] = ['account_id' => $salaryPayable->id, 'fund_id' => null, 'description' => 'Net salaries payable', 'debit' => '0.0000', 'credit' => AccountingDecimal::string(AccountingDecimal::of($run->net_amount))];
         }
 
         return [...$entries, ...$credits];
@@ -675,7 +711,7 @@ class PayrollRunService
         $payments->each(fn (PayrollRunPayment $payment) => $payment->setRelation('transaction', $transactions->get($payment->operational_transaction_id)));
 
         return $payments
-            ->filter(fn (PayrollRunPayment $payment): bool => ! in_array($payment->transaction->status, [OperationalTransactionStatus::Rejected, OperationalTransactionStatus::Reversed], true))
+            ->filter(fn (PayrollRunPayment $payment): bool => ! in_array($payment->transaction->status, [OperationalTransactionStatus::Rejected, OperationalTransactionStatus::Reversed, OperationalTransactionStatus::Cancelled], true))
             ->values();
     }
 

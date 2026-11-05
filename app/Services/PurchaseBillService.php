@@ -2,12 +2,14 @@
 
 namespace App\Services;
 
+use App\Enums\AccountType;
 use App\Enums\JournalStatus;
 use App\Enums\OperationalTransactionStatus;
 use App\Enums\PurchaseBillStatus;
 use App\Models\Account;
 use App\Models\AccountingPeriod;
 use App\Models\Branch;
+use App\Models\Fund;
 use App\Models\JournalEntry;
 use App\Models\PurchaseBill;
 use App\Models\PurchaseBillLine;
@@ -15,6 +17,7 @@ use App\Models\PurchaseOrder;
 use App\Models\User;
 use App\Models\Vendor;
 use App\Models\VoucherType;
+use App\Services\Funds\FundRestrictionPolicy;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Support\Facades\DB;
@@ -30,6 +33,7 @@ class PurchaseBillService
         private AccountMappingService $mappings,
         private ApprovalAuthorityService $authority,
         private PurchaseBillDebitAccountEligibility $debitAccountEligibility,
+        private FundRestrictionPolicy $fundRules,
     ) {}
 
     /** @param array<string, mixed> $data */
@@ -48,6 +52,19 @@ class PurchaseBillService
             $order = filled($data['purchase_order_id'] ?? null) ? $this->lockPurchaseOrder((int) $data['purchase_order_id'], $data) : null;
 
             $total = $this->lineTotal($data['lines']);
+
+            if (blank($data['fund_id'] ?? null)) {
+                $accountIds = collect($data['lines'])->pluck('account_id')->filter()->all();
+                $hasExpenseLine = $accountIds !== [] && Account::query()->whereIn('id', $accountIds)->where('account_type', AccountType::Expense->value)->exists();
+                if ($hasExpenseLine) {
+                    $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+                    if ($genFund) {
+                        $data['fund_id'] = $genFund->id;
+                    }
+                }
+            }
+            $this->validateFundRestrictions($data['fund_id'] ?? null, $data['lines']);
+
             $data = [...$data, ...$this->purchaseOrderLink($order, $data, $total)];
 
             $bill = PurchaseBill::query()->create([
@@ -57,7 +74,7 @@ class PurchaseBillService
                 'created_by' => $actor->id,
             ]);
             $this->createLines($bill, $data['lines']);
-            $this->audit->log('purchase_bills.created', $bill, ['branch_id' => $branch->id, 'vendor_id' => $bill->vendor_id, 'total_amount' => $bill->total_amount, 'purchase_order_id' => $bill->purchase_order_id, 'po_exception_status' => $bill->po_exception_status]);
+            $this->audit->log('purchase_bills.created', $bill, ['branch_id' => $branch->id, 'vendor_id' => $bill->vendor_id, 'total_amount' => $bill->total_amount, 'fund_id' => $bill->fund_id, 'purchase_order_id' => $bill->purchase_order_id, 'po_exception_status' => $bill->po_exception_status]);
 
             return $bill->load('lines');
         }, 3);
@@ -91,7 +108,20 @@ class PurchaseBillService
                 $data['payable_account_id'] = $this->mappings->payableForBills()->id;
             }
             $this->assertLedger((int) $data['payable_account_id'], 'payable_account_id', ['liability']);
+
             $total = $this->lineTotal($data['lines']);
+
+            if (blank($data['fund_id'] ?? null)) {
+                $accountIds = collect($data['lines'])->pluck('account_id')->filter()->all();
+                $hasExpenseLine = $accountIds !== [] && Account::query()->whereIn('id', $accountIds)->where('account_type', AccountType::Expense->value)->exists();
+                if ($hasExpenseLine) {
+                    $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+                    if ($genFund) {
+                        $data['fund_id'] = $genFund->id;
+                    }
+                }
+            }
+            $this->validateFundRestrictions($data['fund_id'] ?? null, $data['lines']);
             $data = [...$data, ...$this->purchaseOrderLink($order, $data, $total, $bill->id)];
 
             $before = $this->auditSnapshot($bill);
@@ -138,6 +168,21 @@ class PurchaseBillService
                 $this->assertIndependentReviewer($locked, $actor, 'approve');
                 $pending = $locked->po_exception_status === 'pending';
                 abort_if($pending !== isset($changes['po_exception_status']) || ($pending && ! $this->mayApprovePoException($actor)), 403, 'A bill that exceeds its purchase order needs Director approval.');
+
+                if ($locked->purchase_order_id && ! $pending) {
+                    $order = PurchaseOrder::query()->with('lines')->lockForUpdate()->find($locked->purchase_order_id);
+                    if ($order) {
+                        $committedBills = $order->bills()
+                            ->whereIn('status', [PurchaseBillStatus::Approved->value, PurchaseBillStatus::Posted->value])
+                            ->whereKeyNot($locked->id)
+                            ->lockForUpdate()
+                            ->get(['id', 'total_amount']);
+                        $billed = $committedBills->reduce(fn (BigDecimal $sum, PurchaseBill $b): BigDecimal => $sum->plus(AccountingDecimal::of($b->total_amount)), BigDecimal::zero()->toScale(4));
+                        if ($billed->plus(AccountingDecimal::of($locked->total_amount))->isGreaterThan(AccountingDecimal::of($order->total_amount))) {
+                            throw ValidationException::withMessages(['approval' => "PO {$order->po_number} par concurrent billing ki wajah se remaining balance exceed ho chuka hai. Is bill ko approve karne ke liye Director exception approval darkar hai."]);
+                        }
+                    }
+                }
             });
         if ($bill->po_exception_status === 'approved') {
             $this->audit->log('purchase_bills.po_exception_approved', $bill, ['purchase_order_id' => $bill->purchase_order_id, 'reason' => $bill->po_exception_reason]);
@@ -208,6 +253,19 @@ class PurchaseBillService
             if ($bill->status !== PurchaseBillStatus::Approved || $bill->journal_entry_id) {
                 throw ValidationException::withMessages(['status' => 'Sirf approved aur unposted bill post ho sakta hai.']);
             }
+            if (blank($bill->fund_id)) {
+                $bill->loadMissing('lines.account');
+                $hasExpenseLine = $bill->lines->contains(fn ($l) => $l->account?->account_type === AccountType::Expense);
+                if ($hasExpenseLine) {
+                    $genFund = Fund::query()->where('code', 'GEN')->where('is_active', true)->first();
+                    if ($genFund) {
+                        $bill->update(['fund_id' => $genFund->id]);
+                        $bill->refresh();
+                    }
+                }
+            }
+            $this->validateFundRestrictions($bill->fund_id, $bill->lines->toArray());
+
             foreach ($bill->lines as $line) {
                 $this->debitAccountEligibility->assertEligible($line->account_id, 'lines.account_id');
             }
@@ -227,9 +285,28 @@ class PurchaseBillService
                 'submitted_at' => $bill->submitted_at, 'approved_at' => $bill->approved_at,
             ]);
             foreach ($bill->lines as $index => $line) {
-                $journal->lines()->create(['line_number' => $index + 1, 'account_id' => $line->account_id, 'service_id' => $line->service_id, 'description' => $line->description, 'debit' => $line->line_total, 'credit' => '0.0000']);
+                $lineFundId = $line->fund_id ?? $bill->fund_id;
+                if (blank($lineFundId) && $line->account?->account_type === AccountType::Expense) {
+                    $lineFundId = Fund::query()->where('code', 'GEN')->where('is_active', true)->value('id');
+                }
+                $journal->lines()->create([
+                    'line_number' => $index + 1,
+                    'account_id' => $line->account_id,
+                    'service_id' => $line->service_id,
+                    'fund_id' => $lineFundId,
+                    'description' => $line->description,
+                    'debit' => $line->line_total,
+                    'credit' => '0.0000',
+                ]);
             }
-            $journal->lines()->create(['line_number' => $bill->lines->count() + 1, 'account_id' => $bill->payable_account_id, 'description' => 'Accounts payable - '.$bill->bill_number, 'debit' => '0.0000', 'credit' => $bill->total_amount]);
+            $journal->lines()->create([
+                'line_number' => $bill->lines->count() + 1,
+                'account_id' => $bill->payable_account_id,
+                'fund_id' => null,
+                'description' => 'Accounts payable - '.$bill->bill_number,
+                'debit' => '0.0000',
+                'credit' => $bill->total_amount,
+            ]);
             $journal = $this->posting->postSystem($journal, $actor);
             $bill->update(['status' => PurchaseBillStatus::Posted, 'journal_entry_id' => $journal->id, 'posted_at' => now()]);
             $this->audit->log('purchase_bills.posted', $bill, ['journal_entry_id' => $journal->id, 'voucher_number' => $journal->voucher_number]);
@@ -421,8 +498,12 @@ class PurchaseBillService
     private function lineTotal(array $lines): BigDecimal
     {
         $total = BigDecimal::zero()->toScale(4);
-        foreach ($lines as $line) {
-            $this->debitAccountEligibility->assertEligible((int) $line['account_id'], 'lines.account_id');
+        foreach ($lines as $index => $line) {
+            $accountId = (int) ($line['account_id'] ?? 0);
+            if ($accountId <= 0) {
+                throw ValidationException::withMessages(["lines.{$index}.account_id" => 'Har bill line ke liye expense ya asset ledger select karna lazmi hai.']);
+            }
+            $this->debitAccountEligibility->assertEligible($accountId, 'lines.account_id');
             $lineTotal = AccountingDecimal::of($line['quantity'])->multipliedBy(AccountingDecimal::of($line['unit_amount']))->toScale(4, RoundingMode::HalfUp);
             if (! $lineTotal->isPositive()) {
                 throw ValidationException::withMessages(['lines' => 'Har bill line ki total amount zero se zyada honi chahiye.']);
@@ -438,7 +519,13 @@ class PurchaseBillService
     {
         foreach ($lines as $index => $line) {
             $lineTotal = AccountingDecimal::of($line['quantity'])->multipliedBy(AccountingDecimal::of($line['unit_amount']))->toScale(4, RoundingMode::HalfUp);
-            $bill->lines()->create([...$line, 'purchase_order_line_id' => filled($line['purchase_order_line_id'] ?? null) ? (int) $line['purchase_order_line_id'] : null, 'line_number' => $index + 1, 'line_total' => AccountingDecimal::string($lineTotal)]);
+            $bill->lines()->create([
+                ...$line,
+                'fund_id' => $line['fund_id'] ?? $bill->fund_id,
+                'purchase_order_line_id' => filled($line['purchase_order_line_id'] ?? null) ? (int) $line['purchase_order_line_id'] : null,
+                'line_number' => $index + 1,
+                'line_total' => AccountingDecimal::string($lineTotal),
+            ]);
         }
     }
 
@@ -450,14 +537,31 @@ class PurchaseBillService
             'branch_id' => $bill->branch_id,
             'payable_account_id' => $bill->payable_account_id,
             'bill_number' => $bill->bill_number,
+            'fund_id' => $bill->fund_id,
             'invoice_date' => $bill->invoice_date->toDateString(),
             'due_date' => $bill->due_date?->toDateString(),
             'purchase_order_id' => $bill->purchase_order_id,
             'description' => $bill->description,
             'attachment_path' => $bill->attachment_path,
             'total_amount' => $bill->total_amount,
-            'lines' => $bill->lines->map(fn (PurchaseBillLine $line): array => $line->only(['account_id', 'service_id', 'description', 'quantity', 'unit_amount', 'line_total', 'purchase_order_line_id']))->values()->all(),
+            'lines' => $bill->lines->map(fn (PurchaseBillLine $line): array => $line->only(['account_id', 'service_id', 'fund_id', 'description', 'quantity', 'unit_amount', 'line_total', 'purchase_order_line_id']))->values()->all(),
         ];
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function validateFundRestrictions(?int $headerFundId, array $lines): void
+    {
+        $linesToCheck = [];
+        foreach ($lines as $index => $line) {
+            $fundId = $line['fund_id'] ?? $headerFundId;
+            $lineTotal = AccountingDecimal::of($line['quantity'] ?? 1)->multipliedBy(AccountingDecimal::of($line['unit_amount'] ?? $line['line_total'] ?? 0))->toScale(4, RoundingMode::HalfUp);
+            $linesToCheck[$index] = [
+                'fund_id' => $fundId,
+                'account_id' => $line['account_id'],
+                'debit' => AccountingDecimal::string($lineTotal),
+            ];
+        }
+        $this->fundRules->check($linesToCheck, fn (int|string $index): string => "lines.{$index}.account_id");
     }
 
     private function guardBranch(PurchaseBill $bill, User $actor): void

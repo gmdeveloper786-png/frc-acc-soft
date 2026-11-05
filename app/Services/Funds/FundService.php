@@ -2,8 +2,6 @@
 
 namespace App\Services\Funds;
 
-use App\Enums\AccountLevel;
-use App\Enums\AccountType;
 use App\Models\Account;
 use App\Models\Fund;
 use App\Models\User;
@@ -138,7 +136,8 @@ class FundService
     }
 
     /**
-     * Permitted ledgers must be active postable expense or asset ledgers.
+     * Permitted ledgers must be active postable expense or eligible capital asset ledgers.
+     * Cash, bank, receivables, and advances cannot be selected.
      *
      * @param  array<string, mixed>  $data
      * @return list<int>
@@ -146,10 +145,13 @@ class FundService
     private function permittedAccountIds(array $data): array
     {
         $ids = collect($data['permitted_account_ids'] ?? [])->filter(fn ($id): bool => filled($id))->map(fn ($id): int => (int) $id)->unique()->sort()->values()->all();
-        $valid = Account::query()->whereKey($ids)->where('level', AccountLevel::Ledger->value)->where('is_postable', true)->where('is_active', true)
-            ->whereIn('account_type', [AccountType::Expense->value, AccountType::Asset->value])->count();
+        if ($ids === []) {
+            return [];
+        }
+
+        $valid = Account::query()->eligibleForFundCharge()->whereKey($ids)->count();
         if ($valid !== count($ids)) {
-            throw ValidationException::withMessages(['permitted_account_ids' => 'Permitted ledgers must be active, postable expense or asset ledgers.']);
+            throw ValidationException::withMessages(['permitted_account_ids' => 'Permitted ledgers must be active, postable expense or eligible capital asset ledgers. Cash, bank, receivables, and advances cannot be selected.']);
         }
 
         return $ids;

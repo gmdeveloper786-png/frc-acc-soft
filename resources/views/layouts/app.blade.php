@@ -76,7 +76,7 @@
                 @if(auth()->user()->canAny(['financial_accounts.view', 'receipts.view', 'payments.view', 'expenses.view', 'vendors.view', 'purchase_orders.view', 'purchase_bills.view', 'petty_cash.view', 'donations.view']))
                     <span class="sidebar-label">Operational Finance</span>
                     @can('financial_accounts.view')<a href="{{ route('financial-accounts.index') }}" class="sidebar-link {{ request()->routeIs('financial-accounts.*') ? 'active' : '' }}"><span class="sidebar-icon">CB</span><span class="sidebar-text">Cash & Bank</span></a>@endcan
-                    @can('receipts.view')<a href="{{ route('transactions.index','cash_receipt') }}" class="sidebar-link {{ $activeTransactionType === 'cash_receipt' ? 'active' : '' }}"><span class="sidebar-icon">CR</span><span class="sidebar-text">Cash Receipts</span></a><a href="{{ route('transactions.index','bank_receipt') }}" class="sidebar-link {{ $activeTransactionType === 'bank_receipt' ? 'active' : '' }}"><span class="sidebar-icon">BR</span><span class="sidebar-text">Bank Receipts</span></a>@endcan
+                    @can('receipts.view')<a href="{{ route('receipts.index') }}" class="sidebar-link {{ request()->routeIs('receipts.*') || in_array($activeTransactionType, ['cash_receipt', 'bank_receipt'], true) ? 'active' : '' }}"><span class="sidebar-icon">RC</span><span class="sidebar-text">Receipts</span></a>@endcan
                     @canany(['payments.view', 'vendor_payments.view', 'petty_cash.view'])<a href="{{ route('payments.index') }}" class="sidebar-link {{ request()->routeIs('payments.*') || in_array($activeTransactionType, ['cash_payment', 'bank_payment', 'vendor_payment', 'petty_cash'], true) ? 'active' : '' }}"><span class="sidebar-icon">PY</span><span class="sidebar-text">Payments</span></a>@endcanany
                     @can('expenses.view')<a href="{{ route('transactions.index','expense') }}" class="sidebar-link {{ $activeTransactionType === 'expense' ? 'active' : '' }}"><span class="sidebar-icon">EX</span><span class="sidebar-text">Expenses</span></a>@endcan
                     @can('vendors.view')<a href="{{ route('vendors.index') }}" class="sidebar-link {{ request()->routeIs('vendors.*') ? 'active' : '' }}"><span class="sidebar-icon">V</span><span class="sidebar-text">Vendors</span></a>@endcan
@@ -148,6 +148,9 @@
                 @if (session('error'))
                     <div class="alert alert-danger" role="alert">{{ session('error') }}</div>
                 @endif
+                @if (session('warning'))
+                    <div class="alert alert-warning" role="alert">{{ session('warning') }}</div>
+                @endif
                 {{-- A page lists in "inline-error-fields" the fields whose errors it already shows next to the form, so they are not repeated here. --}}
                 @php($summaryErrors = collect($errors->getMessages())->except(array_filter(array_map('trim', explode(',', trim($__env->yieldContent('inline-error-fields'))))))->flatten()->unique())
                 @if ($summaryErrors->isNotEmpty())
@@ -161,7 +164,7 @@
                     </div>
                 @endif
 
-                <div class="page-header">
+                <div class="page-header @yield('page-header-class')">
                     <div>
                         <p class="page-eyebrow">@yield('eyebrow', 'Accounting workspace')</p>
                         <h1>@yield('page-title', 'Dashboard')</h1>

@@ -65,4 +65,39 @@ enum AccountMappingKey: string
     {
         return in_array($this, [self::AccountsReceivable, self::AccountsPayable, self::FeeIncomeGeneral], true);
     }
+
+    /** Context under which an otherwise conditional mapping is required for posting, or null. */
+    public function requiredContext(): ?string
+    {
+        return match ($this) {
+            self::SalaryExpense => 'for payroll posting',
+            default => null,
+        };
+    }
+
+    /** Whether this mapping is required either unconditionally or for a specific workflow. */
+    public function isRequiredOrConditional(): bool
+    {
+        return $this->isRequired() || $this->requiredContext() !== null;
+    }
+
+    /** Presentation status badge label when this mapping is not configured. */
+    public function unmappedBadgeLabel(): string
+    {
+        if ($this->isRequired()) {
+            return 'Required — not mapped';
+        }
+
+        if ($context = $this->requiredContext()) {
+            return "Required {$context} — not mapped";
+        }
+
+        return 'Optional — not mapped';
+    }
+
+    /** Presentation status badge tone ('danger' for missing required/conditional, 'neutral' for optional). */
+    public function unmappedBadgeTone(): string
+    {
+        return $this->isRequiredOrConditional() ? 'danger' : 'neutral';
+    }
 }

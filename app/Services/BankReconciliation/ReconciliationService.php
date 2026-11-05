@@ -178,12 +178,25 @@ class ReconciliationService
     }
 
     /** Set aside a statement line that is not a transaction of this account (e.g. a bank error later corrected). */
-    public function ignore(BankReconciliation $reconciliation, BankStatementLine $line, User $actor): void
+    public function ignore(BankReconciliation $reconciliation, BankStatementLine $line, string $reason, User $actor): void
     {
-        $this->editing($reconciliation, $actor, function (BankReconciliation $reconciliation) use ($line, $actor): void {
+        $reason = trim($reason);
+        if ($reason === '' || mb_strlen($reason) < 5) {
+            throw ValidationException::withMessages(['reason' => 'A valid reason (minimum 5 characters) is required to ignore a statement line.']);
+        }
+
+        $this->editing($reconciliation, $actor, function (BankReconciliation $reconciliation) use ($line, $reason, $actor): void {
             $line = $this->statementLine($reconciliation, $line->id);
             $line->update(['status' => BankStatementLine::IGNORED, 'ignored_in_reconciliation_id' => $reconciliation->id]);
-            $this->audit->log('bank_reconciliation.line_ignored', $reconciliation, ['statement_line_id' => $line->id, 'amount' => $line->amount], $actor);
+            $this->audit->log('bank_reconciliation.line_ignored', $reconciliation, [
+                'reconciliation_id' => $reconciliation->id,
+                'statement_line_id' => $line->id,
+                'bank_account' => $reconciliation->financialAccount?->name,
+                'statement_reference' => $line->reference,
+                'amount' => (string) $line->amount,
+                'description' => $line->description,
+                'reason' => $reason,
+            ], $actor);
         });
     }
 
@@ -195,7 +208,14 @@ class ReconciliationService
                 throw ValidationException::withMessages(['statement_line_id' => 'Only a line ignored in this reconciliation can be restored.']);
             }
             $line->update(['status' => BankStatementLine::UNMATCHED, 'ignored_in_reconciliation_id' => null]);
-            $this->audit->log('bank_reconciliation.line_restored', $reconciliation, ['statement_line_id' => $line->id], $actor);
+            $this->audit->log('bank_reconciliation.line_restored', $reconciliation, [
+                'reconciliation_id' => $reconciliation->id,
+                'statement_line_id' => $line->id,
+                'bank_account' => $reconciliation->financialAccount?->name,
+                'statement_reference' => $line->reference,
+                'amount' => (string) $line->amount,
+                'description' => $line->description,
+            ], $actor);
         });
     }
 
@@ -269,8 +289,20 @@ class ReconciliationService
 
     public function authorizeAccount(FinancialAccount $account, User $actor, string $permission): void
     {
-        // A shared bank account's statement holds every branch's entries, so it needs access to every branch.
-        abort_unless($actor->can($permission) && $account->type === 'bank' && $account->bookVisibleTo($actor, $this->branchAccess->canAccess($actor, $account->branch)), 403);
+        abort_unless($actor->can($permission) && $account->type === 'bank', 403);
+
+        if ($account->isShared()) {
+            // Preparing or modifying a shared account reconciliation (creating, uploading statement, matching, cancelling)
+            // spans all branches and requires branches.view_all.
+            // Viewing or approving/returning an existing reconciliation is also authorized for the custodian branch.
+            if ($permission === 'bank_reconciliation.prepare') {
+                abort_unless($actor->can('branches.view_all'), 403);
+            } else {
+                abort_unless($actor->can('branches.view_all') || $this->branchAccess->canAccess($actor, $account->branch), 403);
+            }
+        } else {
+            abort_unless($this->branchAccess->canAccess($actor, $account->branch), 403);
+        }
     }
 
     /**
@@ -346,7 +378,12 @@ class ReconciliationService
             throw ValidationException::withMessages(['journal_line_id' => 'Select a posted entry in this account\'s bank book dated on or before the statement date.']);
         }
         $journal = JournalEntry::query()->lockForUpdate()->find($line->journal_entry_id);
-        if (! $journal || $journal->status !== JournalStatus::Posted) {
+        $isReversedOrReversal = ! $journal
+            || $journal->status !== JournalStatus::Posted
+            || $journal->reversal_of_id !== null
+            || JournalEntry::query()->where('reversal_of_id', $journal->id)->whereIn('status', [JournalStatus::Submitted, JournalStatus::Approved, JournalStatus::Posted])->exists();
+
+        if ($isReversedOrReversal) {
             throw ValidationException::withMessages(['journal_line_id' => 'Only a currently posted, unreversed book entry can be matched.']);
         }
         if (BankReconciliationMatch::query()->where('journal_line_id', $line->id)->exists()) {
@@ -382,6 +419,9 @@ class ReconciliationService
         $figures = $this->calculator->calculate($reconciliation);
         if (! $figures['difference']->isZero()) {
             throw ValidationException::withMessages(['status' => 'The reconciliation difference is '.Amount::format($figures['difference']).'. It must be exactly 0.00 before submission or approval.']);
+        }
+        if ($figures['unrecorded']->isNotEmpty()) {
+            throw ValidationException::withMessages(['status' => 'All statement items must be matched or ignored before submission or approval. ('.$figures['unrecorded']->count().' unrecorded item(s) remaining).']);
         }
 
         return $figures;

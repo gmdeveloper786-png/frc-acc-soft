@@ -299,10 +299,11 @@ html[data-sidebar='collapsed'] .collapse-chevron { transform: rotate(180deg); }
 }
 
 @media print {
-    .app-sidebar, .app-topbar, .sidebar-backdrop, .page-actions, form, .pagination { display: none !important; }
+    .app-sidebar, .app-topbar, .sidebar-backdrop, .page-actions, form, .pagination, .d-print-none { display: none !important; }
     .app-main { margin: 0 !important; }
     .app-content { padding: 0 !important; }
     .surface-card { border: 0 !important; box-shadow: none !important; }
     .table-responsive { overflow: visible !important; }
     body { background: #fff !important; }
+    .card { box-shadow: none !important; break-inside: avoid; page-break-inside: avoid; }
 }

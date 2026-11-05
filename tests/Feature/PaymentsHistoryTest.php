@@ -108,7 +108,8 @@ test('a branch-limited user sees only their branch payments, whatever the filter
 test('the sidebar shows one Payments entry, keeps imprest and receipts, and legacy routes still work', function () {
     $html = $this->get(route('payments.index'))->assertOk()->getContent();
     expect($html)->toContain('<span class="sidebar-text">Payments</span>')->toContain('<span class="sidebar-text">Petty Cash Imprest</span>')
-        ->toContain('<span class="sidebar-text">Cash Receipts</span>')->toContain('<span class="sidebar-text">Expenses</span>')
+        ->toContain('<span class="sidebar-text">Receipts</span>')->toContain('<span class="sidebar-text">Expenses</span>')
+        ->not->toContain('<span class="sidebar-text">Cash Receipts</span>')->not->toContain('<span class="sidebar-text">Bank Receipts</span>')
         ->not->toContain('<span class="sidebar-text">Cash Payments</span>')->not->toContain('<span class="sidebar-text">Bank Payments</span>')
         ->not->toContain('<span class="sidebar-text">Vendor Payments</span>')->not->toContain('<span class="sidebar-text">Petty Cash</span>')
         ->not->toContain('<span class="sidebar-text">Create Payment</span>');
